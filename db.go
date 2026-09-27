@@ -265,6 +265,76 @@ CREATE TABLE IF NOT EXISTS farmer_credit_events (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ===== 冷库库位不足调度（凌晨到货高峰爆满场景） =====
+
+-- 花材批次补充：敏感度等级（高/中/低，决定爆满时优先入库）+ 预计提货时间
+ALTER TABLE flower_batches ADD COLUMN IF NOT EXISTS sensitivity TEXT NOT NULL DEFAULT 'medium';
+ALTER TABLE flower_batches ADD COLUMN IF NOT EXISTS expected_pickup_at TIMESTAMPTZ;
+
+-- 竞价/一口价场次补充：预计提货时间（成交后回写到批次，作为优先入库依据之一）
+ALTER TABLE auctions ADD COLUMN IF NOT EXISTS estimated_pickup_at TIMESTAMPTZ;
+
+-- 临时保温记录：冷库爆满时未入库批次的保温方式与损耗责任
+CREATE TABLE IF NOT EXISTS holding_records (
+  id SERIAL PRIMARY KEY,
+  batch_id INT NOT NULL REFERENCES flower_batches(id),
+  method TEXT NOT NULL,              -- ice_box冰袋保温箱/refrigerated_truck冷藏车/insulated_cover保温被/cool_room临租小冷库/other
+  responsibility TEXT NOT NULL,      -- 保温期间损耗责任承担方：coldstore冷库/wholesaler批发商/farmer花农/broker经纪人
+  note TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',  -- active保温中/stored已入库/failed保温失败
+  failure_note TEXT NOT NULL DEFAULT '',  -- 保温失败说明（开放过快）
+  failed_at TIMESTAMPTZ,
+  -- 保温失败造成开放过快时，冷库负责人与批发商双方确认责任（双签）
+  coldstore_confirmed_by INT REFERENCES users(id),
+  coldstore_confirmed_at TIMESTAMPTZ,
+  coldstore_opinion TEXT NOT NULL DEFAULT '',     -- 冷库方认定的责任方
+  wholesaler_confirmed_by INT REFERENCES users(id),
+  wholesaler_confirmed_at TIMESTAMPTZ,
+  wholesaler_opinion TEXT NOT NULL DEFAULT '',    -- 批发方认定的责任方
+  final_responsibility TEXT NOT NULL DEFAULT '',  -- 双方一致后的最终责任方（disputed=存在分歧）
+  compensation NUMERIC(14,2) NOT NULL DEFAULT 0,  -- 确认后计入结算的损耗赔付（责任方为批发商时记其应付）
+  created_by INT NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 冷库端复盘：对保温失败/爆满事件的同步复盘记录
+CREATE TABLE IF NOT EXISTS cold_store_reviews (
+  id SERIAL PRIMARY KEY,
+  holding_id INT NOT NULL REFERENCES holding_records(id),
+  reviewer_id INT NOT NULL REFERENCES users(id),
+  root_cause TEXT NOT NULL DEFAULT '',   -- 根因分析
+  improvement TEXT NOT NULL DEFAULT '',  -- 改进措施
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 入场顺序调整：市场针对某到货时段调整入场顺序，冷库复盘后通知经纪人确认
+CREATE TABLE IF NOT EXISTS entry_adjustments (
+  id SERIAL PRIMARY KEY,
+  time_slot TEXT NOT NULL,           -- 到货时段，如 02:00-04:00
+  holding_id INT REFERENCES holding_records(id),   -- 关联的保温失败记录（可空）
+  reason TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',   -- 调整后的入场顺序说明
+  status TEXT NOT NULL DEFAULT 'pending',          -- pending待经纪人确认/confirmed已确认
+  created_by INT NOT NULL REFERENCES users(id),
+  broker_id INT REFERENCES users(id),              -- 需确认的经纪人（空=全体经纪人）
+  confirmed_by INT REFERENCES users(id),
+  confirmed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 站内通知（经纪人确认入场调整等）
+CREATE TABLE IF NOT EXISTS notifications (
+  id SERIAL PRIMARY KEY,
+  user_id INT REFERENCES users(id),  -- NULL=广播给该角色全体
+  role TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL,                -- entry_adjustment入场调整/holding_failed保温失败/holding_timeout保温超时
+  ref_id INT NOT NULL DEFAULT 0,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  read_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS settlements (
   id SERIAL PRIMARY KEY,
   month TEXT NOT NULL,          -- YYYY-MM
@@ -301,4 +371,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_batch ON orders(batch_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status_deadline ON orders(status, payment_deadline);
 CREATE INDEX IF NOT EXISTS idx_returns_order ON returns(order_id);
 CREATE INDEX IF NOT EXISTS idx_receivables_customer ON credit_receivables(customer_id, status);
+CREATE INDEX IF NOT EXISTS idx_holding_batch ON holding_records(batch_id, status);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_entry_adjustments_status ON entry_adjustments(status);
 `

@@ -25,6 +25,7 @@ type config struct {
 	SweepIntervalSec        int     // 后台清扫周期（秒）
 	StorageFeePerBundleHour float64 // 冷库费 元/扎/小时
 	CreditDailyPenaltyRate  float64 // 账期逾期日罚息比例
+	HoldingMaxHours         int     // 临时保温超多少小时未入库触发提醒
 	SeedDemo                bool    // 是否写入演示数据
 }
 
@@ -79,6 +80,7 @@ func loadConfig() config {
 		SweepIntervalSec:        envInt("SWEEP_INTERVAL_SEC", 15),
 		StorageFeePerBundleHour: envFloat("STORAGE_FEE_PER_BUNDLE_HOUR", 0.2),
 		CreditDailyPenaltyRate:  envFloat("CREDIT_DAILY_PENALTY_RATE", 0.005),
+		HoldingMaxHours:         envInt("HOLDING_MAX_HOURS", 6),
 		SeedDemo:                envBool("SEED_DEMO", true),
 	}
 }
@@ -141,6 +143,21 @@ func (a *app) routes() {
 	a.mux.HandleFunc("GET /api/preservatives", a.auth(a.handleListPreservatives))
 	a.mux.HandleFunc("POST /api/preservatives", a.require("coldstore", "qc", "manager")(a.handleCreatePreservative))
 	a.mux.HandleFunc("POST /api/batches/{id}/preservative", a.require("coldstore", "qc")(a.handleApplyPreservative))
+
+	// 冷库爆满调度 / 临时保温 / 双签责任 / 冷库复盘 / 入场顺序调整
+	a.mux.HandleFunc("GET /api/storage/dispatch-queue", a.auth(a.handleDispatchQueue))
+	a.mux.HandleFunc("POST /api/holdings", a.require("coldstore", "manager")(a.handleCreateHolding))
+	a.mux.HandleFunc("GET /api/holdings", a.auth(a.handleListHoldings))
+	a.mux.HandleFunc("POST /api/holdings/{id}/fail", a.require("coldstore", "manager")(a.handleHoldingFail))
+	a.mux.HandleFunc("POST /api/holdings/{id}/confirm", a.require("coldstore", "wholesaler", "manager")(a.handleHoldingConfirm))
+	a.mux.HandleFunc("POST /api/holdings/{id}/store", a.require("coldstore", "manager")(a.handleHoldingStore))
+	a.mux.HandleFunc("POST /api/holdings/{id}/reviews", a.require("coldstore", "manager")(a.handleCreateReview))
+	a.mux.HandleFunc("GET /api/cold-store-reviews", a.auth(a.handleListReviews))
+	a.mux.HandleFunc("POST /api/entry-adjustments", a.require("manager")(a.handleCreateEntryAdjustment))
+	a.mux.HandleFunc("GET /api/entry-adjustments", a.auth(a.handleListEntryAdjustments))
+	a.mux.HandleFunc("POST /api/entry-adjustments/{id}/confirm", a.require("broker")(a.handleConfirmEntryAdjustment))
+	a.mux.HandleFunc("GET /api/notifications", a.auth(a.handleListNotifications))
+	a.mux.HandleFunc("POST /api/notifications/{id}/read", a.auth(a.handleReadNotification))
 
 	// 凌晨竞价 / 一口价
 	a.mux.HandleFunc("POST /api/auctions", a.require("manager")(a.handleCreateAuction))

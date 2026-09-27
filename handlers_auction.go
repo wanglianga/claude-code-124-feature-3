@@ -14,12 +14,13 @@ import (
 func (a *app) handleCreateAuction(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	var in struct {
-		BatchID      int      `json:"batch_id"`
-		Mode         string   `json:"mode"` // auction / fixed
-		StartPrice   float64  `json:"start_price"`
-		BuyNowPrice  *float64 `json:"buy_now_price"`
-		MinIncrement *float64 `json:"min_increment"`
-		DurationMin  *int     `json:"duration_min"`
+		BatchID           int      `json:"batch_id"`
+		Mode              string   `json:"mode"` // auction / fixed
+		StartPrice        float64  `json:"start_price"`
+		BuyNowPrice       *float64 `json:"buy_now_price"`
+		MinIncrement      *float64 `json:"min_increment"`
+		DurationMin       *int     `json:"duration_min"`
+		EstimatedPickupAt string   `json:"estimated_pickup_at"` // 预计提货时间（成交后回写批次，影响爆满时入库优先级）
 	}
 	if err := decodeBody(r, &in); err != nil {
 		fail(w, 400, "请求格式错误")
@@ -36,6 +37,15 @@ func (a *app) handleCreateAuction(w http.ResponseWriter, r *http.Request) {
 	if in.Mode == "fixed" && (in.BuyNowPrice == nil || *in.BuyNowPrice <= 0) {
 		fail(w, 400, "一口价模式必须给出 buy_now_price")
 		return
+	}
+	var estimatedPickup *time.Time
+	if in.EstimatedPickupAt != "" {
+		t, err := parseTime(in.EstimatedPickupAt)
+		if err != nil {
+			fail(w, 400, "预计提货时间格式错误，示例 2026-09-27T08:30")
+			return
+		}
+		estimatedPickup = &t
 	}
 	inc := 1.0
 	if in.MinIncrement != nil && *in.MinIncrement > 0 {
@@ -72,10 +82,10 @@ func (a *app) handleCreateAuction(w http.ResponseWriter, r *http.Request) {
 	}
 	var auctionID int
 	err = tx.QueryRowContext(r.Context(),
-		`INSERT INTO auctions (batch_id, mode, start_price, buy_now_price, min_increment, ends_at, created_by)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+		`INSERT INTO auctions (batch_id, mode, start_price, buy_now_price, min_increment, ends_at, created_by, estimated_pickup_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
 		in.BatchID, in.Mode, in.StartPrice, in.BuyNowPrice, inc,
-		time.Now().Add(time.Duration(dur)*time.Minute), u.ID).Scan(&auctionID)
+		time.Now().Add(time.Duration(dur)*time.Minute), u.ID, estimatedPickup).Scan(&auctionID)
 	if err != nil {
 		fail(w, 500, err.Error())
 		return
@@ -97,7 +107,7 @@ func (a *app) handleCreateAuction(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleListAuctions(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(),
 		`SELECT a.id, a.mode, a.start_price, a.buy_now_price, a.min_increment, a.current_price,
-		        a.status, a.starts_at, a.ends_at, a.winner_id,
+		        a.status, a.starts_at, a.ends_at, a.winner_id, a.estimated_pickup_at,
 		        b.id, b.batch_no, b.category, b.origin, b.grade, b.bundles, b.openness, b.risk_flags,
 		        f.name, f.credit_score,
 		        (SELECT count(*) FROM bids WHERE auction_id=a.id)
@@ -115,21 +125,24 @@ func (a *app) handleListAuctions(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			aid, bidCount, batchID, bundles, credit              int
+			aid, bidCount, batchID, bundles, credit                  int
 			mode, status, batchNo, cat, origin, grade, flags, farmer string
-			startPrice, minInc, open                             float64
-			buyNow, cur                                          *float64
-			winner                                               *int
-			startsAt, endsAt                                     time.Time
+			startPrice, minInc, open                                 float64
+			buyNow, cur                                              *float64
+			winner                                                   *int
+			startsAt, endsAt                                         time.Time
+			estimatedPickup                                          *time.Time
 		)
 		if err := rows.Scan(&aid, &mode, &startPrice, &buyNow, &minInc, &cur, &status, &startsAt, &endsAt,
-			&winner, &batchID, &batchNo, &cat, &origin, &grade, &bundles, &open, &flags, &farmer, &credit, &bidCount); err != nil {
+			&winner, &estimatedPickup, &batchID, &batchNo, &cat, &origin, &grade, &bundles, &open, &flags,
+			&farmer, &credit, &bidCount); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
 			"id": aid, "mode": mode, "start_price": startPrice, "buy_now_price": buyNow,
 			"min_increment": minInc, "current_price": cur, "status": status,
 			"starts_at": startsAt, "ends_at": endsAt, "winner_id": winner, "bid_count": bidCount,
+			"estimated_pickup_at": estimatedPickup,
 			"batch": map[string]any{"id": batchID, "batch_no": batchNo, "category": cat, "origin": origin,
 				"grade": grade, "bundles": bundles, "openness": open, "risk_flags": flags},
 			"farmer_name": farmer, "farmer_credit": credit,
@@ -150,15 +163,17 @@ func (a *app) handleGetAuction(w http.ResponseWriter, r *http.Request) {
 		buyNow, cur                                *float64
 		winner                                     *int
 		startsAt, endsAt                           time.Time
+		estimatedPickup                            *time.Time
 		credit                                     int
 	)
 	err := a.db.QueryRowContext(r.Context(),
 		`SELECT a.mode, a.start_price, a.buy_now_price, a.min_increment, a.current_price, a.status,
-		        a.starts_at, a.ends_at, a.winner_id, b.batch_no, b.category, b.origin, f.name, f.credit_score
+		        a.starts_at, a.ends_at, a.winner_id, a.estimated_pickup_at,
+		        b.batch_no, b.category, b.origin, f.name, f.credit_score
 		 FROM auctions a JOIN flower_batches b ON b.id=a.batch_id JOIN users f ON f.id=b.farmer_id
 		 WHERE a.id=$1`, id).
 		Scan(&mode, &startPrice, &buyNow, &minInc, &cur, &status, &startsAt, &endsAt, &winner,
-			&batchNo, &cat, &origin, &farmer, &credit)
+			&estimatedPickup, &batchNo, &cat, &origin, &farmer, &credit)
 	if err == sql.ErrNoRows {
 		fail(w, 404, "拍卖不存在")
 		return
@@ -188,7 +203,8 @@ func (a *app) handleGetAuction(w http.ResponseWriter, r *http.Request) {
 		"id": id, "mode": mode, "start_price": startPrice, "buy_now_price": buyNow,
 		"min_increment": minInc, "current_price": cur, "status": status,
 		"starts_at": startsAt, "ends_at": endsAt, "winner_id": winner,
-		"batch_no": batchNo, "category": cat, "origin": origin,
+		"estimated_pickup_at": estimatedPickup,
+		"batch_no":            batchNo, "category": cat, "origin": origin,
 		"farmer_name": farmer, "farmer_credit": credit,
 		"bids": bids, "realtime_top": rtTop,
 	})
@@ -377,7 +393,10 @@ func (a *app) closeAuctionTx(tx *sql.Tx, auctionID int) error {
 		winnerID, top, auctionID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE flower_batches SET status='sold' WHERE id=$1`, batchID); err != nil {
+	// 成交后把场次的预计提货时间回写批次（批次已登记过则保留），作为爆满时优先入库依据
+	if _, err := tx.Exec(`UPDATE flower_batches SET status='sold',
+		expected_pickup_at=COALESCE(expected_pickup_at, (SELECT estimated_pickup_at FROM auctions WHERE id=$1))
+		WHERE id=$2`, auctionID, batchID); err != nil {
 		return err
 	}
 	_, err = tx.Exec(
@@ -612,10 +631,10 @@ func (a *app) handleListPriceChanges(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, wid             int
-			oldP, newP          *float64
+			id, wid                  int
+			oldP, newP               *float64
 			reason, batchNo, cat, by string
-			at                  time.Time
+			at                       time.Time
 		)
 		if err := rows.Scan(&id, &oldP, &newP, &reason, &at, &batchNo, &cat, &by, &wid); err != nil {
 			continue

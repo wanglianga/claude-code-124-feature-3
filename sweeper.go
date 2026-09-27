@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 )
@@ -119,11 +120,57 @@ func (a *app) sweepOnce() {
 				tx.Exec(`UPDATE storage_slots SET occupied_bundles=GREATEST(0, occupied_bundles-$1) WHERE id=$2`,
 					e.bundles, *e.slotID)
 			}
+			// 仍在临时保温的批次随报损进入保温失败/责任确认流程
+			tx.Exec(`UPDATE holding_records SET status='failed', failure_note='超过可售时长未售出，自动报损', failed_at=now()
+			         WHERE batch_id=$1 AND status='active'`, e.id)
 			log.Printf("批次 #%d 超过可售时长，已报损", e.id)
 		}
 		tx.Commit()
 	}
 	if len(exp) > 0 || len(aucIDs) > 0 {
+		a.rdb.Del(ctx, "cache:overview")
+	}
+
+	// 5) 临时保温超时未入库 → 提醒冷库与市场管理方（每条保温记录只提醒一次）
+	type holdingTimeout struct {
+		id      int
+		batchNo string
+	}
+	hts := []holdingTimeout{}
+	rows, err = a.db.Query(
+		`SELECT h.id, b.batch_no FROM holding_records h
+		 JOIN flower_batches b ON b.id=h.batch_id
+		 WHERE h.status='active' AND h.created_at + make_interval(hours => $1) < now()
+		   AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n.kind='holding_timeout' AND n.ref_id=h.id)`,
+		a.cfg.HoldingMaxHours)
+	if err == nil {
+		for rows.Next() {
+			var h holdingTimeout
+			if rows.Scan(&h.id, &h.batchNo) == nil {
+				hts = append(hts, h)
+			}
+		}
+		rows.Close()
+	}
+	for _, h := range hts {
+		tx, err := a.db.Begin()
+		if err != nil {
+			continue
+		}
+		title := fmt.Sprintf("临时保温超时：批次 %s 已超 %d 小时未入库", h.batchNo, a.cfg.HoldingMaxHours)
+		body := "请尽快安排入库或检查保温状态，防范花材开放过快。"
+		if err := notifyTx(ctx, tx, nil, "coldstore", "holding_timeout", h.id, title, body); err == nil {
+			err = notifyTx(ctx, tx, nil, "manager", "holding_timeout", h.id, title, body)
+		}
+		if err != nil {
+			tx.Rollback()
+			log.Printf("保温超时提醒失败 #%d: %v", h.id, err)
+			continue
+		}
+		tx.Commit()
+		log.Printf("保温记录 #%d（批次 %s）超时未入库，已提醒冷库与管理方", h.id, h.batchNo)
+	}
+	if len(hts) > 0 {
 		a.rdb.Del(ctx, "cache:overview")
 	}
 }

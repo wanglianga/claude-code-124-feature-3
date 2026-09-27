@@ -14,16 +14,18 @@ import (
 func (a *app) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	var in struct {
-		FarmerID       int     `json:"farmer_id"` // 经纪人代录时指定花农
-		Category       string  `json:"category"`
-		Origin         string  `json:"origin"`
-		CutAt          string  `json:"cut_at"`
-		StemLength     float64 `json:"stem_length_cm"`
-		Openness       float64 `json:"openness"`
-		Bundles        int     `json:"bundles"`
-		StemsPerBundle int     `json:"stems_per_bundle"`
-		ArrivalTemp    float64 `json:"arrival_temp_c"`
-		SellableHours  int     `json:"sellable_hours"`
+		FarmerID         int     `json:"farmer_id"` // 经纪人代录时指定花农
+		Category         string  `json:"category"`
+		Origin           string  `json:"origin"`
+		CutAt            string  `json:"cut_at"`
+		StemLength       float64 `json:"stem_length_cm"`
+		Openness         float64 `json:"openness"`
+		Bundles          int     `json:"bundles"`
+		StemsPerBundle   int     `json:"stems_per_bundle"`
+		ArrivalTemp      float64 `json:"arrival_temp_c"`
+		SellableHours    int     `json:"sellable_hours"`
+		Sensitivity      string  `json:"sensitivity"`        // 花材敏感度 high/medium/low，空则按品类默认
+		ExpectedPickupAt string  `json:"expected_pickup_at"` // 预计提货时间（可选，影响爆满时入库优先级）
 	}
 	if err := decodeBody(r, &in); err != nil {
 		fail(w, 400, "请求格式错误")
@@ -47,6 +49,23 @@ func (a *app) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.StemsPerBundle <= 0 {
 		in.StemsPerBundle = 20
+	}
+	sensitivity := in.Sensitivity
+	if sensitivity == "" {
+		sensitivity = categorySensitivity[in.Category]
+	}
+	if !contains(sensitivityLevels, sensitivity) {
+		fail(w, 400, "敏感度须为 high/medium/low")
+		return
+	}
+	var expectedPickup *time.Time
+	if in.ExpectedPickupAt != "" {
+		t, err := parseTime(in.ExpectedPickupAt)
+		if err != nil {
+			fail(w, 400, "预计提货时间格式错误，示例 2026-09-27T08:30")
+			return
+		}
+		expectedPickup = &t
 	}
 	cutAt, err := parseTime(in.CutAt)
 	if err != nil {
@@ -85,10 +104,10 @@ func (a *app) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	var id int
 	err = tx.QueryRowContext(r.Context(),
 		`INSERT INTO flower_batches (farmer_id, broker_id, category, origin, cut_at, stem_length_cm, openness,
-		  bundles, stems_per_bundle, arrival_temp_c, sellable_hours, risk_flags)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+		  bundles, stems_per_bundle, arrival_temp_c, sellable_hours, risk_flags, sensitivity, expected_pickup_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
 		farmerID, brokerID, in.Category, in.Origin, cutAt, in.StemLength, in.Openness,
-		in.Bundles, in.StemsPerBundle, in.ArrivalTemp, in.SellableHours, riskFlags).Scan(&id)
+		in.Bundles, in.StemsPerBundle, in.ArrivalTemp, in.SellableHours, riskFlags, sensitivity, expectedPickup).Scan(&id)
 	if err != nil {
 		fail(w, 500, "登记失败: "+err.Error())
 		return
@@ -102,7 +121,8 @@ func (a *app) handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 201, map[string]any{"id": id, "batch_no": batchNo, "status": "qc_pending", "risk_flags": riskFlags})
+	writeJSON(w, 201, map[string]any{"id": id, "batch_no": batchNo, "status": "qc_pending",
+		"risk_flags": riskFlags, "sensitivity": sensitivity, "expected_pickup_at": expectedPickup})
 }
 
 // handleListBatches 批次列表（花农看自己，经纪人看代录，其余看全部）
@@ -110,7 +130,7 @@ func (a *app) handleListBatches(w http.ResponseWriter, r *http.Request) {
 	u := userOf(r)
 	q := `SELECT b.id, b.batch_no, b.category, b.origin, b.cut_at, b.stem_length_cm, b.openness, b.bundles,
 	        b.stems_per_bundle, b.arrival_temp_c, b.sellable_hours, b.grade, b.risk_flags, b.status,
-	        b.stored_at, b.created_at, f.name, COALESCE(s.code,'')
+	        b.stored_at, b.created_at, f.name, COALESCE(s.code,''), b.sensitivity, b.expected_pickup_at
 	      FROM flower_batches b
 	      JOIN users f ON f.id=b.farmer_id
 	      LEFT JOIN storage_slots s ON s.id=b.storage_slot_id`
@@ -141,14 +161,17 @@ func (a *app) handleListBatches(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, bundles, spb, sellH                                    int
-			batchNo, cat, origin, grade, flags, status, farmer, slot   string
-			stem, open, temp                                           float64
-			cutAt, createdAt                                           time.Time
-			storedAt                                                   *time.Time
+			id, bundles, spb, sellH                                  int
+			batchNo, cat, origin, grade, flags, status, farmer, slot string
+			stem, open, temp                                         float64
+			cutAt, createdAt                                         time.Time
+			storedAt                                                 *time.Time
+			sensitivity                                              string
+			expectedPickup                                           *time.Time
 		)
 		if err := rows.Scan(&id, &batchNo, &cat, &origin, &cutAt, &stem, &open, &bundles, &spb,
-			&temp, &sellH, &grade, &flags, &status, &storedAt, &createdAt, &farmer, &slot); err != nil {
+			&temp, &sellH, &grade, &flags, &status, &storedAt, &createdAt, &farmer, &slot,
+			&sensitivity, &expectedPickup); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -156,6 +179,7 @@ func (a *app) handleListBatches(w http.ResponseWriter, r *http.Request) {
 			"stem_length_cm": stem, "openness": open, "bundles": bundles, "stems_per_bundle": spb,
 			"arrival_temp_c": temp, "sellable_hours": sellH, "grade": grade, "risk_flags": flags,
 			"status": status, "stored_at": storedAt, "created_at": createdAt, "farmer_name": farmer, "slot_code": slot,
+			"sensitivity": sensitivity, "expected_pickup_at": expectedPickup,
 		})
 	}
 	writeJSON(w, 200, out)
@@ -169,22 +193,24 @@ func (a *app) handleGetBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var (
-		bundle                                                  map[string]any
-		batchNo, cat, origin, grade, flags, status, farmer      string
-		stem, open, temp                                        float64
-		bundles, spb, sellH                                     int
-		cutAt, createdAt                                        time.Time
-		storedAt, outAt                                         *time.Time
-		slotCode                                                string
+		bundle                                             map[string]any
+		batchNo, cat, origin, grade, flags, status, farmer string
+		stem, open, temp                                   float64
+		bundles, spb, sellH                                int
+		cutAt, createdAt                                   time.Time
+		storedAt, outAt                                    *time.Time
+		slotCode, sensitivity                              string
+		expectedPickup                                     *time.Time
 	)
 	err := a.db.QueryRowContext(r.Context(),
 		`SELECT b.batch_no, b.category, b.origin, b.cut_at, b.stem_length_cm, b.openness, b.bundles,
 		        b.stems_per_bundle, b.arrival_temp_c, b.sellable_hours, b.grade, b.risk_flags, b.status,
-		        b.stored_at, b.out_at, b.created_at, f.name, COALESCE(s.code,'')
+		        b.stored_at, b.out_at, b.created_at, f.name, COALESCE(s.code,''), b.sensitivity, b.expected_pickup_at
 		 FROM flower_batches b JOIN users f ON f.id=b.farmer_id
 		 LEFT JOIN storage_slots s ON s.id=b.storage_slot_id WHERE b.id=$1`, id).
 		Scan(&batchNo, &cat, &origin, &cutAt, &stem, &open, &bundles, &spb, &temp, &sellH,
-			&grade, &flags, &status, &storedAt, &outAt, &createdAt, &farmer, &slotCode)
+			&grade, &flags, &status, &storedAt, &outAt, &createdAt, &farmer, &slotCode,
+			&sensitivity, &expectedPickup)
 	if err == sql.ErrNoRows {
 		fail(w, 404, "批次不存在")
 		return
@@ -198,6 +224,7 @@ func (a *app) handleGetBatch(w http.ResponseWriter, r *http.Request) {
 		"arrival_temp_c": temp, "sellable_hours": sellH, "grade": grade, "risk_flags": flags,
 		"status": status, "stored_at": storedAt, "out_at": outAt, "created_at": createdAt,
 		"farmer_name": farmer, "slot_code": slotCode,
+		"sensitivity": sensitivity, "expected_pickup_at": expectedPickup,
 	}
 
 	qc := []map[string]any{}
@@ -388,7 +415,7 @@ func (a *app) handleListSlots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
-// handleStoreBatch 入库：库位不足返回 409（冷库库位不足异常）
+// handleStoreBatch 入库：库位不足返回 409，并附带按「敏感度→已成交→预计提货时间」排序的调度队列
 func (a *app) handleStoreBatch(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(r, "id")
 	if !ok {
@@ -408,52 +435,20 @@ func (a *app) handleStoreBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-
-	var status string
-	var bundles int
-	var slotID *int
-	err = tx.QueryRowContext(r.Context(),
-		`SELECT status, bundles, storage_slot_id FROM flower_batches WHERE id=$1 FOR UPDATE`, id).
-		Scan(&status, &bundles, &slotID)
-	if err == sql.ErrNoRows {
-		fail(w, 404, "批次不存在")
-		return
-	} else if err != nil {
-		fail(w, 500, err.Error())
-		return
-	}
-	if slotID != nil {
-		fail(w, 409, "该批次已入库")
-		return
-	}
-	if status != "qc_passed" && status != "qc_flagged" {
-		fail(w, 409, "仅质检后的批次可入库，当前状态: "+status)
-		return
-	}
-	var code string
-	var capacity, occupied int
-	err = tx.QueryRowContext(r.Context(),
-		`SELECT code, capacity_bundles, occupied_bundles FROM storage_slots WHERE id=$1 FOR UPDATE`, in.SlotID).
-		Scan(&code, &capacity, &occupied)
-	if err == sql.ErrNoRows {
-		fail(w, 404, "库位不存在")
-		return
-	} else if err != nil {
-		fail(w, 500, err.Error())
-		return
-	}
-	if occupied+bundles > capacity {
-		fail(w, 409, fmt.Sprintf("冷库库位不足：库位 %s 剩余 %d 扎，本批次需要 %d 扎，请更换库位或等待出库", code, capacity-occupied, bundles))
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(),
-		`UPDATE storage_slots SET occupied_bundles=occupied_bundles+$1 WHERE id=$2`, bundles, in.SlotID); err != nil {
-		fail(w, 500, err.Error())
-		return
-	}
-	if _, err := tx.ExecContext(r.Context(),
-		`UPDATE flower_batches SET storage_slot_id=$1, stored_at=now(), status='stored' WHERE id=$2`, in.SlotID, id); err != nil {
-		fail(w, 500, err.Error())
+	code, err := storeBatchTx(r.Context(), tx, id, in.SlotID)
+	if err != nil {
+		if se, ok2 := err.(*slotFullError); ok2 {
+			// 冷库爆满：返回 409 + 优先入库调度队列，引导先保高优先级批次、其余登记临时保温
+			queue, _ := dispatchQueue(r.Context(), tx)
+			writeJSON(w, 409, map[string]any{"error": se.msg,
+				"free_bundles": freeBundles(r.Context(), tx), "queue": queue})
+			return
+		}
+		status := 409
+		if err.Error() == "批次不存在" || err.Error() == "库位不存在" {
+			status = 404
+		}
+		fail(w, status, err.Error())
 		return
 	}
 	if err := tx.Commit(); err != nil {

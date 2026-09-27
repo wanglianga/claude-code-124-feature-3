@@ -26,11 +26,11 @@ func (a *app) handleListReceivables(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	for rows.Next() {
 		var (
-			id, orderID     int
-			amount          float64
-			due, createdAt  time.Time
+			id, orderID           int
+			amount                float64
+			due, createdAt        time.Time
 			status, name, orderNo string
-			settledAt       *time.Time
+			settledAt             *time.Time
 		)
 		if rows.Scan(&id, &amount, &due, &status, &settledAt, &createdAt, &name, &orderNo, &orderID) == nil {
 			daysOverdue := 0
@@ -218,6 +218,28 @@ func (a *app) handleGenerateSettlement(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		rows.Close()
+		// 临时保温失败双签定责：判定花农责任的损耗赔付扣款
+		rows, err = tx.QueryContext(r.Context(),
+			`SELECT h.id, b.batch_no, h.compensation, h.failed_at FROM holding_records h
+			 JOIN flower_batches b ON b.id=h.batch_id
+			 WHERE b.farmer_id=$1 AND h.final_responsibility='farmer' AND h.compensation>0
+			   AND h.failed_at>=$2 AND h.failed_at<$3`, fid, start, end)
+		if err != nil {
+			fail(w, 500, err.Error())
+			return
+		}
+		for rows.Next() {
+			var hid int
+			var no string
+			var comp float64
+			var failedAt time.Time
+			if rows.Scan(&hid, &no, &comp, &failedAt) == nil {
+				loss += comp
+				lines = append(lines, settleLine{"holding_loss", "holding",
+					fmt.Sprintf("批次 %s 临时保温失败花农责任赔付（开放过快）", no), hid, -comp})
+			}
+		}
+		rows.Close()
 		rows, err = tx.QueryContext(r.Context(),
 			`SELECT b.id, b.batch_no, b.bundles, b.stored_at, b.out_at FROM flower_batches b
 			 WHERE b.farmer_id=$1 AND b.stored_at IS NOT NULL AND b.stored_at<$2
@@ -313,6 +335,29 @@ func (a *app) handleGenerateSettlement(w http.ResponseWriter, r *http.Request) {
 				loss += claim
 				lines = append(lines, settleLine{"return_refund", "return",
 					fmt.Sprintf("订单 %s 退货赔付（%s）", no, reason), rid, -claim})
+			}
+		}
+		rows.Close()
+		// 临时保温失败双签定责：判定批发商责任的损耗赔付（如冰袋耗尽致开放过快）
+		rows, err = tx.QueryContext(r.Context(),
+			`SELECT h.id, b.batch_no, h.compensation, h.failed_at FROM holding_records h
+			 JOIN flower_batches b ON b.id=h.batch_id
+			 JOIN inventories iv ON iv.batch_id=b.id
+			 WHERE iv.wholesaler_id=$1 AND h.final_responsibility='wholesaler' AND h.compensation>0
+			   AND h.failed_at>=$2 AND h.failed_at<$3`, wid, start, end)
+		if err != nil {
+			fail(w, 500, err.Error())
+			return
+		}
+		for rows.Next() {
+			var hid int
+			var no string
+			var comp float64
+			var failedAt time.Time
+			if rows.Scan(&hid, &no, &comp, &failedAt) == nil {
+				loss += comp
+				lines = append(lines, settleLine{"holding_loss", "holding",
+					fmt.Sprintf("批次 %s 临时保温失败批发商责任赔付（开放过快）", no), hid, -comp})
 			}
 		}
 		rows.Close()
@@ -491,10 +536,10 @@ func (a *app) handleListSettlements(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, entityID                int
-			month, role, name           string
+			id, entityID                      int
+			month, role, name                 string
 			gross, loss, storage, credit, net float64
-			at                          time.Time
+			at                                time.Time
 		)
 		if rows.Scan(&id, &month, &role, &entityID, &gross, &loss, &storage, &credit, &net, &at, &name) == nil {
 			out = append(out, map[string]any{
@@ -515,10 +560,10 @@ func (a *app) handleGetSettlement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var (
-		month, role, name           string
-		entityID                    int
+		month, role, name                 string
+		entityID                          int
 		gross, loss, storage, credit, net float64
-		at                          time.Time
+		at                                time.Time
 	)
 	err := a.db.QueryRowContext(r.Context(),
 		`SELECT s.month, s.entity_role, s.entity_id, s.gross_amount, s.loss_deduction, s.storage_fee,

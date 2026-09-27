@@ -64,10 +64,10 @@ func (a *app) seedDemo() {
 	}
 	addSlot("A-01", "A", 300, 80)
 	addSlot("A-02", "A", 300, 60)
-	addSlot("A-03", "A", 300, 85)
-	addSlot("A-04", "A", 300, 0)
+	addSlot("A-03", "A", 300, 200)
+	addSlot("A-04", "A", 300, 300) // 凌晨高峰已满
 	addSlot("B-01", "B", 150, 40)
-	addSlot("B-02", "B", 150, 0)
+	addSlot("B-02", "B", 150, 150) // 凌晨高峰已满
 
 	var pres1, pres2 int
 	tx.QueryRow(`INSERT INTO preservative_batches (code, brand, ingredient, expires_at)
@@ -239,10 +239,130 @@ func (a *app) seedDemo() {
 	tx.Exec(`UPDATE flower_batches SET sellable_hours=sellable_hours+12 WHERE id=$1`, b1)
 	_ = pres2
 
+	// ===== 凌晨到货高峰·冷库爆满调度演示（A-04/B-02 已满，剩余库位 670 扎 < 待入库 740 扎） =====
+	addBatchV2 := func(farmer, broker, cat, origin string, cutAt time.Time, stem, open float64,
+		bundles, spb int, temp float64, sellH int, grade, flags, status, sensitivity string,
+		pickup *time.Time) int {
+		var id int
+		var brokerID *int
+		if broker != "" {
+			if bid, ok := uid[broker]; ok {
+				brokerID = &bid
+			}
+		}
+		if err := tx.QueryRow(
+			`INSERT INTO flower_batches (farmer_id, broker_id, category, origin, cut_at, stem_length_cm, openness,
+			  bundles, stems_per_bundle, arrival_temp_c, sellable_hours, grade, risk_flags, status,
+			  sensitivity, expected_pickup_at, created_at)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+			uid[farmer], brokerID, cat, origin, cutAt, stem, open, bundles, spb, temp, sellH,
+			grade, flags, status, sensitivity, pickup, cutAt.Add(2*time.Hour)).Scan(&id); err != nil {
+			log.Printf("seed 批次失败: %v", err)
+			return 0
+		}
+		tx.Exec(`UPDATE flower_batches SET batch_no=$1 WHERE id=$2`, fmt.Sprintf("B%06d", id), id)
+		return id
+	}
+	pickup := func(hours float64) *time.Time {
+		t := now.Add(time.Duration(hours * float64(time.Hour)))
+		return &t
+	}
+
+	// 批次7：玫瑰·高敏感·已成交待提货（批发商02 一口价拍得，预计 2 小时后提货，未入库）
+	b7 := addBatchV2("farmer01", "", "rose", "云南昆明", now.Add(-4*h), 68, 3.0, 120, 20, 4.0, 40,
+		"A", "", "sold", "high", pickup(2))
+	addQC(b7, "A", 0.93, 0.04, true, "花头紧实", now.Add(-3*h))
+	var auc7 int
+	tx.QueryRow(`INSERT INTO auctions (batch_id, mode, start_price, buy_now_price, min_increment, current_price,
+		winner_id, status, starts_at, ends_at, created_by, estimated_pickup_at)
+		VALUES ($1,'fixed',42,42,1,42,$2,'closed',$3,$4,$5,$6) RETURNING id`,
+		b7, uid["wholesaler02"], now.Add(-2*h), now.Add(-1*h), uid["boss01"], pickup(2)).Scan(&auc7)
+	tx.Exec(`INSERT INTO bids (auction_id, wholesaler_id, price, created_at) VALUES ($1,$2,42,$3)`,
+		auc7, uid["wholesaler02"], now.Add(-1*h))
+	tx.Exec(`INSERT INTO inventories (wholesaler_id, batch_id, auction_id, bundles_total, bundles_available,
+		cost_price, created_at) VALUES ($1,$2,$3,120,120,42,$4)`,
+		uid["wholesaler02"], b7, auc7, now.Add(-1*h))
+
+	// 批次8：郁金香·高敏感·经纪人代录·未成交（预计 5 小时后提货，未入库）
+	b8 := addBatchV2("farmer02", "broker01", "tulip", "辽宁凌源", now.Add(-3*h), 46, 2.5, 90, 10, 5.5, 30,
+		"B", "", "qc_passed", "high", pickup(5))
+	addQC(b8, "B", 0.86, 0.07, true, "个别花苞偏生", now.Add(-2*h))
+
+	// 批次9：百合·中敏感·未成交（预计 8 小时后提货，未入库）
+	b9 := addBatchV2("farmer01", "", "lily", "云南玉溪", now.Add(-2*h), 62, 2.0, 150, 10, 5.0, 48,
+		"B", "", "qc_passed", "medium", pickup(8))
+	addQC(b9, "B", 0.88, 0.06, true, "整体均匀", now.Add(-1*h))
+
+	// 批次10：尤加利·低敏感·未成交（预计 12 小时后提货，未入库）
+	b10 := addBatchV2("farmer02", "", "eucalyptus", "广东广州", now.Add(-90*time.Minute), 52, 1.5, 200, 10, 6.5, 96,
+		"C", "", "qc_passed", "low", pickup(12))
+	addQC(b10, "C", 0.8, 0.12, true, "叶色正常", now.Add(-1*h))
+
+	// 批次11：洋桔梗·高敏感·已成交·临时保温失败（开放过快，冷库与批发商已双签，定责冷库）
+	b11 := addBatchV2("farmer01", "", "eustoma", "云南昆明", now.Add(-7*h), 42, 3.5, 80, 10, 7.5, 26,
+		"B", "over_opened", "sold", "high", pickup(1))
+	addQC(b11, "B", 0.84, 0.09, true, "到货温度略高", now.Add(-6*h))
+	var auc11 int
+	tx.QueryRow(`INSERT INTO auctions (batch_id, mode, start_price, min_increment, current_price, winner_id,
+		status, starts_at, ends_at, created_by, estimated_pickup_at)
+		VALUES ($1,'auction',28,1,31,$2,'closed',$3,$4,$5,$6) RETURNING id`,
+		b11, uid["wholesaler01"], now.Add(-6*h), now.Add(-5*h), uid["boss01"], pickup(1)).Scan(&auc11)
+	tx.Exec(`INSERT INTO bids (auction_id, wholesaler_id, price, created_at) VALUES ($1,$2,31,$3)`,
+		auc11, uid["wholesaler01"], now.Add(-5*h))
+	tx.Exec(`INSERT INTO inventories (wholesaler_id, batch_id, auction_id, bundles_total, bundles_available,
+		cost_price, created_at) VALUES ($1,$2,$3,80,80,31,$4)`,
+		uid["wholesaler01"], b11, auc11, now.Add(-5*h))
+	var hold11 int
+	tx.QueryRow(`INSERT INTO holding_records (batch_id, method, responsibility, note, status, failure_note,
+		failed_at, coldstore_confirmed_by, coldstore_confirmed_at, coldstore_opinion,
+		wholesaler_confirmed_by, wholesaler_confirmed_at, wholesaler_opinion,
+		final_responsibility, compensation, created_by, created_at)
+		VALUES ($1,'ice_box','coldstore','冰袋保温箱+风机','failed','凌晨高峰冰袋耗尽，箱温升至 12℃，花材开放过快',
+		$2,$3,$4,'coldstore',$5,$6,'coldstore','coldstore',240,$7,$8) RETURNING id`,
+		b11, now.Add(-3*h), uid["cold01"], now.Add(-2*h), uid["wholesaler01"], now.Add(-100*time.Minute),
+		uid["cold01"], now.Add(-6*h)).Scan(&hold11)
+	// 冷库端同步复盘
+	var rev11 int
+	tx.QueryRow(`INSERT INTO cold_store_reviews (holding_id, reviewer_id, root_cause, improvement, created_at)
+		VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+		hold11, uid["cold01"],
+		"凌晨 2-4 点到货集中，冰袋储备不足且未及时补充，高敏感洋桔梗滞留月台 3 小时",
+		"高敏感花材优先入库；冰袋按到货量 120% 备货；滞留超 1 小时即上报市场调度",
+		now.Add(-90*time.Minute)).Scan(&rev11)
+	// 市场调整该时段入场顺序 → 通知经纪人 → 经纪人已确认
+	var adj11 int
+	tx.QueryRow(`INSERT INTO entry_adjustments (time_slot, holding_id, reason, detail, status,
+		created_by, broker_id, confirmed_by, confirmed_at, created_at)
+		VALUES ('02:00-04:00',$1,$2,$3,'confirmed',$4,$5,$6,$7,$8) RETURNING id`,
+		hold11,
+		"批次 B000011 洋桔梗临时保温失败开放过快，定责冷库；为避免高敏感花材滞留，调整入场顺序",
+		"02:00-04:00 时段：高敏感花材（玫瑰/洋桔梗/郁金香）优先进场入库；低敏感（尤加利）顺延至 04:00 后",
+		uid["boss01"], uid["broker01"], uid["broker01"], now.Add(-30*time.Minute), now.Add(-1*h)).Scan(&adj11)
+	tx.Exec(`INSERT INTO notifications (user_id, role, kind, ref_id, title, body, read_at, created_at)
+		VALUES ($1,'broker','entry_adjustment',$2,$3,$4,$5,$6)`,
+		uid["broker01"], adj11, "入场顺序调整（02:00-04:00 时段）",
+		"高敏感花材优先进场入库，低敏感顺延。请经纪人确认。",
+		now.Add(-30*time.Minute), now.Add(-1*h))
+	// 给冷库/批发商/管理方各留一条已双签通知
+	for _, role := range []string{"coldstore", "wholesaler", "manager"} {
+		tx.Exec(`INSERT INTO notifications (user_id, role, kind, ref_id, title, body, created_at)
+			SELECT id,$1,'holding_confirmed',$2,$3,$4,$5 FROM users WHERE role=$1`,
+			role, hold11, "保温失败责任已双签：批次 B000011",
+			"冷库与批发商一致认定责任方为「冷库」，赔付 240 元计入月度结算。", now.Add(-100*time.Minute))
+	}
+
+	// 批次12：节日混搭·中敏感·临时保温中（等待入库，演示 active 状态与超时提醒）
+	b12 := addBatchV2("farmer02", "broker01", "holiday_mix", "云南昆明", now.Add(-2*h), 58, 3.0, 60, 15, 5.0, 60,
+		"B", "", "qc_passed", "medium", pickup(6))
+	addQC(b12, "B", 0.87, 0.08, true, "混搭比例均匀", now.Add(-90*time.Minute))
+	tx.Exec(`INSERT INTO holding_records (batch_id, method, responsibility, note, status, created_by, created_at)
+		VALUES ($1,'refrigerated_truck','wholesaler','冷藏车月台暂存','active',$2,$3)`,
+		b12, uid["cold01"], now.Add(-2*h))
+
 	if err := tx.Commit(); err != nil {
 		log.Printf("演示数据提交失败: %v", err)
 		return
 	}
 	a.syncFarmerRanking(ctx)
-	log.Println("演示数据就绪：13 个账号、6 个批次、1 场进行中的竞价、库存/订单/退货/账期/调货样例")
+	log.Println("演示数据就绪：13 个账号、12 个批次、冷库爆满调度场景（保温失败双签/复盘/入场调整已确认）")
 }

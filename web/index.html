@@ -67,8 +67,10 @@
 <header>
   <h1>🌹 凌晨鲜花批发市场 · 竞价分货与损耗服务</h1>
   <span class="who" id="who"></span>
+  <button class="ghost small" id="bellBtn" style="display:none" onclick="toggleNotif()">🔔 <span id="bellN"></span></button>
   <button class="ghost small" id="logoutBtn" style="display:none" onclick="logout()">退出登录</button>
 </header>
+<div id="notifPanel" style="display:none;position:fixed;top:52px;right:16px;z-index:98;width:360px;max-height:60vh;overflow-y:auto;background:var(--card);border:1px solid var(--line);border-radius:12px"></div>
 
 <div id="loginView" class="login-wrap" style="display:none">
   <div class="card">
@@ -95,6 +97,12 @@ const esc = s => String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','
 const CAT = {rose:'玫瑰',lily:'百合',tulip:'郁金香',eustoma:'洋桔梗',eucalyptus:'尤加利',holiday_mix:'节日混搭'};
 const PURPOSE = {wedding:'婚礼',retail:'门店零售',livestream:'直播花束',enterprise:'企业订单'};
 const REASON = {petal_drop:'到店掉瓣',quality:'品质不符',temp_damage:'冷链失温',short_stem:'短枝过多',other:'其他'};
+const SENS = {high:'高敏感',medium:'中敏感',low:'低敏感'};
+const HOLD_METHOD = {ice_box:'冰袋保温箱',refrigerated_truck:'冷藏车暂存',insulated_cover:'保温被覆盖',cool_room:'临租小冷库',other:'其他'};
+const RESP = {coldstore:'冷库',wholesaler:'批发商',farmer:'花农',broker:'经纪人',disputed:'分歧待协调'};
+const HSTATUS = {active:'保温中',stored:'已入库',failed:'保温失败'};
+const ESTATUS = {pending:'待经纪人确认',confirmed:'已确认'};
+const TIMESLOTS = ['00:00-02:00','02:00-04:00','04:00-06:00','06:00-08:00'];
 const ROLE = {farmer:'花农',broker:'经纪人',qc:'质检',wholesaler:'批发商',shop:'花店采购',coldstore:'冷库',logistics:'配送',finance:'财务',manager:'市场管理'};
 const BSTATUS = {qc_pending:'待质检',qc_passed:'质检通过',qc_flagged:'质检打回',stored:'已入库',in_auction:'竞价中',sold:'已售出',expired:'已报损',closed:'已出清'};
 const ASTATUS = {active:'进行中',closed:'已成交',unsold:'流拍',cancelled:'已取消'};
@@ -106,7 +114,7 @@ const money = n => '¥' + Number(n||0).toFixed(2);
 const fmtT = s => s ? new Date(s).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
 const badge = (txt,cls='') => `<span class="badge ${cls}">${txt}</span>`;
 const stBadge = (map,v) => { const c = /报损|打回|驳回|取消|逾期|超时/.test(map[v]||v)?'r':(/待|在途|进行中|锁定/.test(map[v]||v)?'y':(/售|成交|送达|付款|通过|赔付|到达|结清/.test(map[v]||v)?'g':'')); return badge(map[v]||v,c); };
-const flagsTxt = f => (f||'').split(',').filter(Boolean).map(x=>({uneven_openness:'开放度不均',high_short_stem:'短枝比例高',temp_abnormal:'冷链失温'}[x]||x)).join('、');
+const flagsTxt = f => (f||'').split(',').filter(Boolean).map(x=>({uneven_openness:'开放度不均',high_short_stem:'短枝比例高',temp_abnormal:'冷链失温',over_opened:'开放过快'}[x]||x)).join('、');
 
 let S = { token: localStorage.getItem('fm_tok')||'', me: JSON.parse(localStorage.getItem('fm_me')||'null'), view:'' };
 
@@ -163,15 +171,47 @@ function logout(){
 
 const MENUS = {
   farmer:     [['batches','到货登记'],['dash','市场看板']],
-  broker:     [['batches','到货登记'],['dash','市场看板']],
+  broker:     [['batches','到货登记'],['coldchain','入场调整'],['dash','市场看板']],
   qc:         [['qc','质检台'],['returns','退货审核'],['storage','冷库与保鲜'],['dash','市场看板']],
-  wholesaler: [['auctions','凌晨竞价大厅'],['inventory','我的库存'],['orders','销售订单'],['dash','市场看板']],
+  wholesaler: [['auctions','凌晨竞价大厅'],['inventory','我的库存'],['orders','销售订单'],['coldchain','损耗确认'],['dash','市场看板']],
   shop:       [['market','采购市场'],['orders','我的订单'],['dash','市场看板']],
-  coldstore:  [['storage','冷库与保鲜'],['dash','市场看板']],
+  coldstore:  [['storage','冷库与保鲜'],['coldchain','调度与保温'],['dash','市场看板']],
   logistics:  [['deliveries','配送调度'],['dash','市场看板']],
   finance:    [['finance','财务结算'],['dash','市场看板']],
-  manager:    [['dash','市场看板'],['admin','拍卖管理'],['auctions','竞价大厅'],['returns','退货对账'],['finance','财务结算']],
+  manager:    [['dash','市场看板'],['admin','拍卖管理'],['coldchain','冷库调度'],['auctions','竞价大厅'],['returns','退货对账'],['finance','财务结算']],
 };
+
+/* ---------------- 站内通知 ---------------- */
+async function refreshBell(){
+  if(!S.token) return;
+  try{
+    const j = await api('/notifications');
+    S.notifs = j.items||[];
+    $('#bellN').textContent = j.unread>0 ? j.unread : '';
+    $('#bellBtn').style.display = '';
+  }catch(e){}
+}
+function toggleNotif(){
+  const p = $('#notifPanel');
+  if(p.style.display==='none'||!p.style.display){ renderNotifs(); p.style.display='block'; }
+  else p.style.display='none';
+}
+function renderNotifs(){
+  $('#notifPanel').innerHTML = '<div style="padding:10px 12px;border-bottom:1px solid var(--line);font-size:13px"><b>站内通知</b></div>'+
+    (S.notifs||[]).map(n=>`
+    <div style="padding:8px 12px;border-bottom:1px solid var(--line);${n.read_at?'opacity:.55':''}">
+      <div style="font-size:13px">${esc(n.title)}</div>
+      <div class="muted" style="font-size:12px;margin-top:2px">${esc(n.body)}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:5px">
+        <span class="muted" style="font-size:11px">${fmtT(n.created_at)}</span>
+        ${n.read_at?'':`<button class="small ghost" onclick="readNotif(${n.id})">标记已读</button>`}
+      </div>
+    </div>`).join('')||'<div class="muted" style="padding:12px">暂无通知</div>';
+}
+const readNotif = run(async id=>{
+  await api('/notifications/'+id+'/read','POST',{});
+  await refreshBell(); renderNotifs();
+});
 
 function enter(){
   $('#loginView').style.display='none';
@@ -180,6 +220,8 @@ function enter(){
   $('#who').textContent = `${S.me.name}（${ROLE[S.me.role]||S.me.role}）`;
   const menu = MENUS[S.me.role]||[['dash','市场看板']];
   $('#menu').innerHTML = menu.map(m=>`<a data-v="${m[0]}" onclick="go('${m[0]}')">${m[1]}</a>`).join('');
+  refreshBell();
+  if(!S.bellTimer) S.bellTimer = setInterval(refreshBell, 30000);
   go(menu[0][0]);
 }
 function go(v){
@@ -207,7 +249,19 @@ async function vDash(){
     <div class="stat"><div class="n">${c.timeout_orders||0}</div><div class="t">超时未付款取消</div></div>
     <div class="stat"><div class="n">${c.requested_returns||0}</div><div class="t">待审核退货</div></div>
     <div class="stat"><div class="n">${c.expired_batches||0}</div><div class="t">报损批次</div></div>
+    <div class="stat"><div class="n" style="color:var(--warn)">${c.holding_active||0}</div><div class="t">临时保温中（库位不足）</div></div>
+    <div class="stat"><div class="n" style="color:var(--bad)">${c.holding_pending_confirm||0}</div><div class="t">保温失败待双签</div></div>
+    <div class="stat"><div class="n">${c.entry_adjustments_pending||0}</div><div class="t">入场调整待经纪人确认</div></div>
+    <div class="stat"><div class="n">${c.entry_adjustments_confirmed||0}</div><div class="t">入场调整已确认</div></div>
   </div>
+  <div class="card"><h3>冷库爆满调度 · 临时保温与责任确认</h3>
+    <table><tr><th>批次</th><th>品类</th><th>敏感度</th><th>保温方式</th><th>责任方</th><th>状态</th><th>冷库确认</th><th>批发商确认</th><th>最终定责</th></tr>
+    ${(ov.cold_holdings||[]).map(x=>`<tr><td>${x.batch_no}</td><td>${CAT[x.category]||x.category}</td>
+      <td>${SENS[x.sensitivity]||x.sensitivity}</td><td>${HOLD_METHOD[x.method]||x.method}</td>
+      <td>${RESP[x.responsibility]||x.responsibility}</td><td>${stBadge(HSTATUS,x.status)}</td>
+      <td>${x.coldstore_confirmed?badge('✓','g'):(x.status==='failed'?badge('待确认','y'):'—')}</td>
+      <td>${x.wholesaler_confirmed?badge('✓','g'):(x.status==='failed'?badge('待确认','y'):'—')}</td>
+      <td>${x.final_responsibility?badge(RESP[x.final_responsibility]||x.final_responsibility,'p'):'—'}</td></tr>`).join('')||'<tr><td colspan=9 class=muted>当前无临时保温批次</td></tr>'}</table></div>
   <div class="card"><h3>成交速度（按品类 / 产地）</h3>
     <table><tr><th>品类</th><th>产地</th><th>成交笔数</th><th>平均成交耗时</th><th>成交金额</th></tr>
     ${(ov.deal_speed||[]).map(x=>`<tr><td>${CAT[x.category]||x.category}</td><td>${esc(x.origin)}</td>
@@ -255,16 +309,19 @@ async function vBatches(){
       <div><label>每扎枝数</label><input id="b_spb" type="number" value="20" style="width:70px"></div>
       <div><label>冷链到货温度(℃)</label><input id="b_temp" type="number" step="0.1" value="5" style="width:90px"></div>
       <div><label>可售时长(小时)</label><input id="b_sell" type="number" value="48" style="width:90px"></div>
+      <div><label>敏感度</label><select id="b_sens"><option value="">按品类默认</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select></div>
+      <div><label>预计提货时间</label><input id="b_pickup" type="datetime-local"></div>
       <div><button onclick="createBatch()">提交登记</button></div>
     </div>
-    <div class="muted" style="margin-top:6px">冷链温度 &gt; 8℃ 将自动打上「冷链失温」风险标。</div>
+    <div class="muted" style="margin-top:6px">冷链温度 &gt; 8℃ 将自动打上「冷链失温」风险标；敏感度与预计提货时间决定冷库爆满时的优先入库顺序。</div>
   </div>
   <div class="card"><h3>${isBroker?'我代录的批次':'我的批次'}</h3>
-    <table><tr><th>批次号</th><th>品类</th><th>产地</th><th>扎数</th><th>开放度</th><th>温度</th><th>质检</th><th>风险</th><th>状态</th><th>库位</th><th>登记时间</th></tr>
+    <table><tr><th>批次号</th><th>品类</th><th>产地</th><th>扎数</th><th>开放度</th><th>温度</th><th>质检</th><th>敏感度</th><th>预计提货</th><th>风险</th><th>状态</th><th>库位</th><th>登记时间</th></tr>
     ${batches.map(b=>`<tr><td>${b.batch_no}</td><td>${CAT[b.category]||b.category}</td><td>${esc(b.origin)}</td>
       <td>${b.bundles}</td><td>${b.openness}</td><td>${b.arrival_temp_c}℃</td><td>${b.grade||'—'}</td>
+      <td>${SENS[b.sensitivity]||'—'}</td><td>${b.expected_pickup_at?fmtT(b.expected_pickup_at):'—'}</td>
       <td>${flagsTxt(b.risk_flags)?badge(flagsTxt(b.risk_flags),'y'):'—'}</td>
-      <td>${stBadge(BSTATUS,b.status)}</td><td>${b.slot_code||'—'}</td><td>${fmtT(b.created_at)}</td></tr>`).join('')||'<tr><td colspan=11 class=muted>暂无批次</td></tr>'}</table></div>`;
+      <td>${stBadge(BSTATUS,b.status)}</td><td>${b.slot_code||'—'}</td><td>${fmtT(b.created_at)}</td></tr>`).join('')||'<tr><td colspan=13 class=muted>暂无批次</td></tr>'}</table></div>`;
   const d = new Date(Date.now()-6*3600e3);
   $('#b_cut').value = new Date(d.getTime()-d.getTimezoneOffset()*6e4).toISOString().slice(0,16);
 }
@@ -273,10 +330,11 @@ const createBatch = run(async ()=>{
     category: $('#b_cat').value, origin: $('#b_origin').value, cut_at: $('#b_cut').value,
     stem_length_cm: +$('#b_stem').value, openness: +$('#b_open').value, bundles: +$('#b_bundles').value,
     stems_per_bundle: +$('#b_spb').value, arrival_temp_c: +$('#b_temp').value, sellable_hours: +$('#b_sell').value,
+    sensitivity: $('#b_sens').value, expected_pickup_at: $('#b_pickup').value||'',
   };
   if(S.me.role==='broker') body.farmer_id = +$('#b_farmer').value;
   const j = await api('/batches','POST',body);
-  toast(`批次 ${j.batch_no} 登记成功，待质检`);
+  toast(`批次 ${j.batch_no} 登记成功（${SENS[j.sensitivity]||''}），待质检`);
   vBatches();
 });
 
@@ -665,23 +723,171 @@ async function vAdmin(){
       <div><label>一口价/扎</label><input id="a_buy" type="number" placeholder="一口价模式必填" style="width:110px"></div>
       <div><label>最小加价</label><input id="a_inc" type="number" value="1" style="width:70px"></div>
       <div><label>时长(分钟)</label><input id="a_dur" type="number" value="30" style="width:80px"></div>
+      <div><label>预计提货时间</label><input id="a_pickup" type="datetime-local"></div>
       <div><button onclick="createAuction()">发起专场</button></div>
-    </div>`}</div>
+    </div>
+    <div class="muted">预计提货时间成交后回写批次，作为冷库爆满时「已成交批次」的入库排序依据。</div>`}</div>
   <div class="card"><h3>花农信用排名（竞价排序依据）</h3>
     <table><tr><th>名次</th><th>花农</th><th>信用分</th></tr>
     ${rank.map(x=>`<tr><td>${x.rank}</td><td>${esc(x.name)}</td><td>${badge(x.credit_score,'g')}</td></tr>`).join('')}</table></div>`;
 }
 const createAuction = run(async ()=>{
   const body = { batch_id:+$('#a_batch').value, mode:$('#a_mode').value,
-    start_price:+$('#a_start').value, min_increment:+$('#a_inc').value, duration_min:+$('#a_dur').value };
+    start_price:+$('#a_start').value, min_increment:+$('#a_inc').value, duration_min:+$('#a_dur').value,
+    estimated_pickup_at:$('#a_pickup').value||'' };
   if($('#a_buy').value) body.buy_now_price = +$('#a_buy').value;
   await api('/auctions','POST',body);
   toast('专场已发起'); go('auctions');
 });
 
+/* ---------------- 冷库爆满调度与临时保温（多角色） ---------------- */
+async function vColdchain(){
+  const role = S.me.role;
+  const isOps = role==='coldstore'||role==='manager';
+  const reqs = [api('/storage/dispatch-queue'), api('/holdings'), api('/cold-store-reviews'), api('/entry-adjustments')];
+  if(isOps) reqs.push(api('/storage/slots'));
+  const [dq, holdings, reviews, adjustments, slots] = await Promise.all(reqs);
+  const queue = dq.queue||[];
+  const sensBadge = s => badge(SENS[s]||s, s==='high'?'r':(s==='medium'?'y':'g'));
+  const respTxt = r => RESP[r]||'—';
+
+  // 调度队列卡（所有角色可见）
+  let html = `
+  <div class="card"><h3>冷库爆满调度队列 <span class="muted">剩余库位 ${dq.free_bundles} 扎</span></h3>
+    <div class="muted" style="margin-bottom:8px">${esc(dq.rule)}。库位不足时高优先级批次先入库，未入库批次登记临时保温。</div>
+    <table><tr><th>#</th><th>批次</th><th>品类</th><th>产地</th><th>敏感度</th><th>扎数</th><th>状态</th><th>预计提货</th><th>临时保温</th><th>优先级理由</th></tr>
+    ${queue.map(q=>`<tr><td>${q.rank}</td><td>${q.batch_no}</td><td>${CAT[q.category]||q.category}</td>
+      <td>${esc(q.origin)}</td><td>${sensBadge(q.sensitivity)}</td><td>${q.bundles}</td>
+      <td>${stBadge(BSTATUS,q.status)}${q.sold?badge('已成交','p'):''}</td>
+      <td>${q.expected_pickup_at?fmtT(q.expected_pickup_at):'<span class="muted">未登记</span>'}</td>
+      <td>${q.holding_id?stBadge(HSTATUS,q.holding_status)+' '+(HOLD_METHOD[q.holding_method]||''):'—'}</td>
+      <td class="muted">${esc(q.reason)}</td></tr>`).join('')||'<tr><td colspan=10 class=muted>当前无待入库批次</td></tr>'}</table></div>`;
+
+  // 临时保温登记（冷库/管理）
+  if(isOps){
+    const candidates = queue.filter(q=>!q.holding_id);
+    html += `
+  <div class="card"><h3>登记临时保温（未入库花材）</h3>
+    ${candidates.length===0?'<div class="muted">暂无待保温批次</div>':
+    `<div class="row">
+      <div><label>批次</label><select id="h_batch">${candidates.map(q=>
+        `<option value="${q.batch_id}">${q.batch_no} ${CAT[q.category]||q.category} ${q.bundles}扎 ${SENS[q.sensitivity]}</option>`).join('')}</select></div>
+      <div><label>保温方式</label><select id="h_method">${Object.entries(HOLD_METHOD).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></div>
+      <div><label>损耗责任方</label><select id="h_resp">${['coldstore','wholesaler','farmer','broker'].map(k=>`<option value="${k}">${RESP[k]}</option>`).join('')}</select></div>
+      <div><label>备注</label><input id="h_note" placeholder="如 冰袋×6+风机，月台 3 号位"></div>
+      <div><button onclick="createHolding()">登记保温</button></div>
+    </div>
+    <div class="muted">保温期间发生损耗由登记的责任方承担；保温失败（开放过快）需冷库负责人与批发商双方确认责任。</div>`}</div>`;
+  }
+
+  // 保温记录列表
+  const canColdConfirm = h => isOps && h.status==='failed' && !h.coldstore_confirmed_by;
+  const canWsConfirm = h => role==='wholesaler' && h.status==='failed' && !h.wholesaler_confirmed_by
+      && (!h.wholesaler_id || h.wholesaler_id===S.me.id);
+  html += `
+  <div class="card"><h3>临时保温记录</h3>
+    <table><tr><th>批次</th><th>品类</th><th>扎数</th><th>保温方式</th><th>责任方</th><th>状态</th><th>失败说明</th>
+      <th>冷库确认</th><th>批发商确认</th><th>最终定责</th><th>赔付</th>${isOps||role==='wholesaler'?'<th>操作</th>':''}</tr>
+    ${holdings.map(h=>`<tr>
+      <td>${h.batch_no}</td><td>${CAT[h.category]||h.category}</td><td>${h.bundles}</td>
+      <td>${HOLD_METHOD[h.method]||h.method}</td><td>${respTxt(h.responsibility)}</td>
+      <td>${stBadge(HSTATUS,h.status)}</td>
+      <td class="muted" style="max-width:180px;white-space:normal">${esc(h.failure_note)||'—'}</td>
+      <td>${h.coldstore_confirmed_by?badge('✓ '+respTxt(h.coldstore_opinion),'g'):(h.status==='failed'?badge('待确认','y'):'—')}</td>
+      <td>${h.wholesaler_confirmed_by?badge('✓ '+respTxt(h.wholesaler_opinion),'g'):(h.status==='failed'?badge('待确认','y'):'—')}</td>
+      <td>${h.final_responsibility?badge(respTxt(h.final_responsibility),h.final_responsibility==='disputed'?'r':'p'):'—'}</td>
+      <td>${h.compensation>0?money(h.compensation):'—'}</td>
+      ${isOps||role==='wholesaler'?`<td>
+        ${isOps&&h.status==='active'?`<button class="small warn" onclick="failHolding(${h.id})">失败上报</button>`:''}
+        ${isOps&&(h.status==='active'||h.status==='failed')?`
+          <select id="hs_slot_${h.id}" style="width:110px">${(slots||[]).map(s=>`<option value="${s.id}">${s.code} 余${s.free_bundles}</option>`).join('')}</select>
+          <button class="small green" onclick="storeHolding(${h.id})">转入库</button>`:''}
+        ${canColdConfirm(h)?`<button class="small" onclick="confirmHolding(${h.id})">冷库确认责任</button>`:''}
+        ${canWsConfirm(h)?`<button class="small" onclick="confirmHolding(${h.id})">批发商确认责任</button>`:''}
+        ${isOps&&h.status==='failed'?`<button class="small ghost" onclick="reviewHolding(${h.id})">冷库复盘</button>`:''}
+      </td>`:''}</tr>`).join('')||'<tr><td colspan=12 class=muted>暂无保温记录</td></tr>'}</table>
+    <div class="muted" style="margin-top:6px">保温失败须冷库负责人与批发商双方确认责任；双方认定一致后定责，赔付计入月度结算。</div></div>`;
+
+  // 冷库复盘
+  html += `
+  <div class="card"><h3>冷库端复盘</h3>
+    <table><tr><th>#</th><th>批次</th><th>根因分析</th><th>改进措施</th><th>复盘人</th><th>时间</th></tr>
+    ${reviews.map(r=>`<tr><td>${r.id}</td><td>${r.batch_no}</td>
+      <td style="white-space:normal;max-width:280px">${esc(r.root_cause)}</td>
+      <td style="white-space:normal;max-width:280px">${esc(r.improvement)}</td>
+      <td>${esc(r.reviewer)}</td><td>${fmtT(r.created_at)}</td></tr>`).join('')||'<tr><td colspan=6 class=muted>暂无复盘记录</td></tr>'}</table></div>`;
+
+  // 入场顺序调整
+  if(role==='manager'){
+    const failedHolds = holdings.filter(h=>h.status==='failed');
+    html += `
+  <div class="card"><h3>发起入场顺序调整（通知经纪人确认）</h3>
+    <div class="row">
+      <div><label>到货时段</label><select id="e_slot">${TIMESLOTS.map(t=>`<option>${t}</option>`).join('')}</select></div>
+      <div><label>关联保温失败记录</label><select id="e_holding"><option value="">不关联</option>
+        ${failedHolds.map(h=>`<option value="${h.id}">${h.batch_no}（${HOLD_METHOD[h.method]}失败）</option>`).join('')}</select></div>
+      <div><label>调整原因</label><input id="e_reason" placeholder="如 洋桔梗保温失败，高敏感花材滞留" style="width:220px"></div>
+      <div><label>调整后入场顺序</label><input id="e_detail" placeholder="如 高敏感优先进场，低敏感顺延至 04:00 后" style="width:260px"></div>
+      <div><button onclick="createAdjustment()">发布并通知经纪人</button></div>
+    </div>
+    <div class="muted">发布后通知全体经纪人；经纪人确认后生效。</div></div>`;
+  }
+  const canBrokerConfirm = a => role==='broker' && a.status==='pending' && (!a.broker_id || a.broker_id===S.me.id);
+  html += `
+  <div class="card"><h3>入场顺序调整</h3>
+    <table><tr><th>#</th><th>时段</th><th>原因</th><th>调整后顺序</th><th>状态</th><th>确认人</th><th>发起</th><th>时间</th>${role==='broker'?'<th>操作</th>':''}</tr>
+    ${adjustments.map(a=>`<tr><td>${a.id}</td><td>${badge(a.time_slot,'p')}</td>
+      <td style="white-space:normal;max-width:220px">${esc(a.reason)}</td>
+      <td style="white-space:normal;max-width:260px">${esc(a.detail)}</td>
+      <td>${stBadge(ESTATUS,a.status)}</td>
+      <td>${a.confirmed_name?esc(a.confirmed_name)+' '+fmtT(a.confirmed_at):'—'}</td>
+      <td>${esc(a.created_by)}</td><td>${fmtT(a.created_at)}</td>
+      ${role==='broker'?`<td>${canBrokerConfirm(a)?`<button class="small green" onclick="confirmAdjustment(${a.id})">确认</button>`:''}</td>`:''}
+      </tr>`).join('')||'<tr><td colspan=9 class=muted>暂无入场调整</td></tr>'}</table></div>`;
+
+  $('#view').innerHTML = html;
+}
+const createHolding = run(async ()=>{
+  await api('/holdings','POST',{batch_id:+$('#h_batch').value, method:$('#h_method').value,
+    responsibility:$('#h_resp').value, note:$('#h_note').value});
+  toast('已登记临时保温'); vColdchain();
+});
+const failHolding = run(async id=>{
+  const note = prompt('保温失败说明（花材开放过快）：','冰袋耗尽，箱温升高，花材开放过快'); if(!note) return;
+  const comp = prompt('损耗赔付金额（元，双签后计入结算）：','200'); if(comp===null) return;
+  await api(`/holdings/${id}/fail`,'POST',{failure_note:note, compensation:+comp||0});
+  toast('已上报保温失败，等待冷库与批发商双方确认责任'); vColdchain();
+});
+const confirmHolding = run(async id=>{
+  const r = prompt('认定责任方 coldstore冷库/wholesaler批发商/farmer花农/broker经纪人：','coldstore'); if(!r) return;
+  const j = await api(`/holdings/${id}/confirm`,'POST',{responsibility:r.trim()});
+  toast(j.final_responsibility?`双方已确认，最终定责：${RESP[j.final_responsibility]||j.final_responsibility}`:'已确认，等待另一方确认');
+  vColdchain();
+});
+const storeHolding = run(async id=>{
+  const j = await api(`/holdings/${id}/store`,'POST',{slot_id:+$(`#hs_slot_${id}`).value});
+  toast(`已转入库 ${j.slot_code}`); vColdchain();
+});
+const reviewHolding = run(async id=>{
+  const cause = prompt('根因分析：','冰袋储备不足，高敏感花材滞留月台过久'); if(!cause) return;
+  const imp = prompt('改进措施：','高敏感花材优先入库，冰袋按 120% 备货'); if(!imp) return;
+  await api(`/holdings/${id}/reviews`,'POST',{root_cause:cause, improvement:imp});
+  toast('复盘已记录，已同步市场管理方'); vColdchain();
+});
+const createAdjustment = run(async ()=>{
+  const body = {time_slot:$('#e_slot').value, reason:$('#e_reason').value, detail:$('#e_detail').value};
+  if($('#e_holding').value) body.holding_id = +$('#e_holding').value;
+  await api('/entry-adjustments','POST',body);
+  toast('入场调整已发布，已通知经纪人确认'); vColdchain();
+});
+const confirmAdjustment = run(async id=>{
+  await api(`/entry-adjustments/${id}/confirm`,'POST',{});
+  toast('已确认入场顺序调整'); vColdchain();
+});
+
 const VIEWS = { dash:vDash, batches:vBatches, qc:vQC, storage:vStorage, auctions:vAuctions,
   inventory:vInventory, market:vMarket, orders:vOrders, deliveries:vDeliveries,
-  returns:vReturns, finance:vFinance, admin:vAdmin };
+  returns:vReturns, finance:vFinance, admin:vAdmin, coldchain:vColdchain };
 
 /* ---------------- 启动 ---------------- */
 (async function(){
