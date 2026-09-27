@@ -121,12 +121,19 @@ func (a *app) handleAnalyticsOverview(w http.ResponseWriter, r *http.Request) {
 	// 运营计数
 	counts := map[string]int64{}
 	for k, q := range map[string]string{
-		"active_auctions":   `SELECT count(*) FROM auctions WHERE status='active'`,
-		"pending_orders":    `SELECT count(*) FROM orders WHERE status='pending_payment'`,
-		"timeout_orders":    `SELECT count(*) FROM orders WHERE status='timeout_cancelled'`,
-		"requested_returns": `SELECT count(*) FROM returns WHERE status='requested'`,
-		"expired_batches":   `SELECT count(*) FROM flower_batches WHERE status='expired'`,
-		"stored_batches":    `SELECT count(*) FROM flower_batches WHERE status IN ('stored','in_auction')`,
+		"active_auctions":          `SELECT count(*) FROM auctions WHERE status='active'`,
+		"pending_orders":           `SELECT count(*) FROM orders WHERE status='pending_payment'`,
+		"timeout_orders":           `SELECT count(*) FROM orders WHERE status='timeout_cancelled'`,
+		"requested_returns":        `SELECT count(*) FROM returns WHERE status='requested'`,
+		"expired_batches":          `SELECT count(*) FROM flower_batches WHERE status='expired'`,
+		"stored_batches":           `SELECT count(*) FROM flower_batches WHERE status IN ('stored','in_auction')`,
+		"cold_waiting":             `SELECT count(*) FROM cold_storage_queue WHERE status='waiting'`,
+		"cold_temp_failed":         `SELECT count(*) FROM cold_storage_queue WHERE status='failed'`,
+		"cold_incidents_pending":   `SELECT count(*) FROM cold_chain_incidents WHERE status='pending'`,
+		"cold_incidents_confirmed": `SELECT count(*) FROM cold_chain_incidents WHERE status='confirmed'`,
+		"cold_incidents_reviewed":  `SELECT count(*) FROM cold_chain_incidents WHERE status='reviewed'`,
+		"entry_adjust_notified":    `SELECT count(*) FROM entry_order_adjustments WHERE status='notified'`,
+		"entry_adjust_confirmed":   `SELECT count(*) FROM entry_order_adjustments WHERE status='confirmed'`,
 	} {
 		var n int64
 		if err := a.db.QueryRowContext(ctx, q).Scan(&n); err == nil {
@@ -167,7 +174,7 @@ func (a *app) handleAnalyticsStability(w http.ResponseWriter, r *http.Request) {
 		if rows.Scan(&origin, &cat, &batches, &gradeAvg, &tempOK, &clean) == nil {
 			stats[key{origin, cat}] = &map[string]any{
 				"origin": origin, "category": cat, "batches": batches,
-				"grade_avg": round2(gradeAvg), "temp_ok_rate": round2(tempOK*100), "clean_rate": round2(clean*100),
+				"grade_avg": round2(gradeAvg), "temp_ok_rate": round2(tempOK * 100), "clean_rate": round2(clean * 100),
 				"sold_bundles": 0, "returned_bundles": 0, "return_rate_pct": 0.0,
 			}
 		}

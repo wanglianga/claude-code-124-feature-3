@@ -189,6 +189,27 @@ func (a *app) routes() {
 	a.mux.HandleFunc("GET /api/analytics/overview", a.auth(a.handleAnalyticsOverview))
 	a.mux.HandleFunc("GET /api/analytics/stability", a.auth(a.handleAnalyticsStability))
 	a.mux.HandleFunc("GET /api/farmers/ranking", a.auth(a.handleFarmerRanking))
+
+	// 冷库库位不足调度（凌晨到货高峰爆满）
+	a.mux.HandleFunc("GET /api/coldchain/board", a.auth(a.handleColdBoard))
+	a.mux.HandleFunc("GET /api/coldchain/sensitivity", a.auth(a.handleListSensitivity))
+	a.mux.HandleFunc("PUT /api/coldchain/sensitivity/{category}", a.require("manager")(a.handleUpsertSensitivity))
+	a.mux.HandleFunc("GET /api/coldchain/queue", a.auth(a.handleColdQueue))
+	a.mux.HandleFunc("POST /api/coldchain/queue", a.require("coldstore", "manager", "farmer", "broker")(a.handleEnqueue))
+	a.mux.HandleFunc("POST /api/coldchain/queue/{id}/admit", a.require("coldstore", "manager")(a.handleAdmit))
+	a.mux.HandleFunc("POST /api/coldchain/queue/{id}/release", a.require("coldstore", "manager", "farmer", "broker")(a.handleReleaseQueue))
+	a.mux.HandleFunc("GET /api/coldchain/incidents", a.auth(a.handleListIncidents))
+	a.mux.HandleFunc("POST /api/coldchain/incidents", a.require("coldstore", "manager", "qc")(a.handleCreateIncident))
+	a.mux.HandleFunc("POST /api/coldchain/incidents/{id}/confirm", a.require("coldstore", "wholesaler", "manager")(a.handleConfirmIncident))
+	a.mux.HandleFunc("POST /api/coldchain/incidents/{id}/review", a.require("coldstore", "manager")(a.handleReviewIncident))
+	a.mux.HandleFunc("POST /api/coldchain/incidents/{id}/adjustment", a.require("manager")(a.handleCreateAdjustment))
+	a.mux.HandleFunc("GET /api/coldchain/adjustments", a.auth(a.handleListAdjustments))
+	a.mux.HandleFunc("POST /api/coldchain/adjustments/{id}/confirm", a.require("broker", "manager")(a.handleBrokerConfirmAdjustment))
+
+	// 站内通知（入场调整通知经纪人等）
+	a.mux.HandleFunc("GET /api/notifications", a.auth(a.handleListNotifications))
+	a.mux.HandleFunc("POST /api/notifications/{id}/read", a.auth(a.handleReadNotification))
+	a.mux.HandleFunc("POST /api/notifications/read-all", a.auth(a.handleReadAllNotifications))
 }
 
 func (a *app) handleHealthz(w http.ResponseWriter, r *http.Request) {

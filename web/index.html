@@ -67,6 +67,7 @@
 <header>
   <h1>🌹 凌晨鲜花批发市场 · 竞价分货与损耗服务</h1>
   <span class="who" id="who"></span>
+  <button class="ghost small" id="notifyBtn" style="display:none" onclick="go('notify')">通知</button>
   <button class="ghost small" id="logoutBtn" style="display:none" onclick="logout()">退出登录</button>
 </header>
 
@@ -102,6 +103,11 @@ const OSTATUS = {pending_payment:'待付款',paid:'已付款',dispatched:'配送
 const RSTATUS = {requested:'待审核',approved:'已赔付',rejected:'已驳回'};
 const RECV = {open:'未到期',overdue:'已逾期',settled:'已结清'};
 const TSTATUS = {pending:'待发车',in_transit:'在途',delivered:'已送达',arrived:'已到达'};
+const TEMPM = {ice_pack:'加冰瓶/冰袋',quilt:'保温棉被',ventilated:'通风暂存区',shadow:'遮阳阴凉处',fan:'风机降温',other:'其他临时措施'};
+const LOSSRESP = {farmer:'花农承担',coldstore:'冷库承担',wholesaler:'批发商承担',shared:'共同承担'};
+const QSTATUS = {waiting:'等待入库',admitted:'已放行入库',failed:'临时保温失败',released:'货主已拉走',expired:'已过期'};
+const INCSTATUS = {pending:'待双方确认',confirmed:'双方已确认·待复盘',reviewed:'已复盘结案'};
+const ADJSTATUS = {proposed:'拟议中',notified:'待经纪人确认',confirmed:'经纪人已确认',rejected:'经纪人有异议'};
 const money = n => '¥' + Number(n||0).toFixed(2);
 const fmtT = s => s ? new Date(s).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
 const badge = (txt,cls='') => `<span class="badge ${cls}">${txt}</span>`;
@@ -162,15 +168,15 @@ function logout(){
 }
 
 const MENUS = {
-  farmer:     [['batches','到货登记'],['dash','市场看板']],
-  broker:     [['batches','到货登记'],['dash','市场看板']],
-  qc:         [['qc','质检台'],['returns','退货审核'],['storage','冷库与保鲜'],['dash','市场看板']],
-  wholesaler: [['auctions','凌晨竞价大厅'],['inventory','我的库存'],['orders','销售订单'],['dash','市场看板']],
+  farmer:     [['batches','到货登记'],['coldchain','冷库调度'],['notify','通知'],['dash','市场看板']],
+  broker:     [['batches','到货登记'],['coldchain','冷库调度'],['notify','通知'],['dash','市场看板']],
+  qc:         [['qc','质检台'],['returns','退货审核'],['storage','冷库与保鲜'],['coldchain','冷库调度'],['notify','通知'],['dash','市场看板']],
+  wholesaler: [['coldchain','冷库调度'],['auctions','凌晨竞价大厅'],['inventory','我的库存'],['orders','销售订单'],['notify','通知'],['dash','市场看板']],
   shop:       [['market','采购市场'],['orders','我的订单'],['dash','市场看板']],
-  coldstore:  [['storage','冷库与保鲜'],['dash','市场看板']],
+  coldstore:  [['coldchain','冷库调度'],['storage','冷库与保鲜'],['notify','通知'],['dash','市场看板']],
   logistics:  [['deliveries','配送调度'],['dash','市场看板']],
   finance:    [['finance','财务结算'],['dash','市场看板']],
-  manager:    [['dash','市场看板'],['admin','拍卖管理'],['auctions','竞价大厅'],['returns','退货对账'],['finance','财务结算']],
+  manager:    [['dash','市场看板'],['coldchain','冷库调度'],['admin','拍卖管理'],['auctions','竞价大厅'],['returns','退货对账'],['finance','财务结算'],['notify','通知']],
 };
 
 function enter(){
@@ -180,7 +186,18 @@ function enter(){
   $('#who').textContent = `${S.me.name}（${ROLE[S.me.role]||S.me.role}）`;
   const menu = MENUS[S.me.role]||[['dash','市场看板']];
   $('#menu').innerHTML = menu.map(m=>`<a data-v="${m[0]}" onclick="go('${m[0]}')">${m[1]}</a>`).join('');
+  if(menu.some(m=>m[0]==='notify')){
+    $('#notifyBtn').style.display='';
+    refreshUnread();
+    setInterval(refreshUnread, 30000);
+  }
   go(menu[0][0]);
+}
+async function refreshUnread(){
+  try{
+    const n = await api('/notifications?unread=1');
+    $('#notifyBtn').textContent = n.unread_count>0 ? `通知 (${n.unread_count})` : '通知';
+  }catch(e){}
 }
 function go(v){
   S.view = v;
@@ -207,6 +224,10 @@ async function vDash(){
     <div class="stat"><div class="n">${c.timeout_orders||0}</div><div class="t">超时未付款取消</div></div>
     <div class="stat"><div class="n">${c.requested_returns||0}</div><div class="t">待审核退货</div></div>
     <div class="stat"><div class="n">${c.expired_batches||0}</div><div class="t">报损批次</div></div>
+    <div class="stat"><div class="n" style="color:var(--warn)">${c.cold_waiting||0}</div><div class="t">冷库爆满·等待入库</div></div>
+    <div class="stat"><div class="n" style="color:var(--bad)">${c.cold_incidents_pending||0}</div><div class="t">保温失败·待双方确认</div></div>
+    <div class="stat"><div class="n">${c.cold_incidents_confirmed||0}</div><div class="t">事故待冷库复盘</div></div>
+    <div class="stat"><div class="n" style="color:var(--acc)">${c.entry_adjust_notified||0}</div><div class="t">入场调整待经纪人确认</div></div>
   </div>
   <div class="card"><h3>成交速度（按品类 / 产地）</h3>
     <table><tr><th>品类</th><th>产地</th><th>成交笔数</th><th>平均成交耗时</th><th>成交金额</th></tr>
@@ -679,9 +700,193 @@ const createAuction = run(async ()=>{
   toast('专场已发起'); go('auctions');
 });
 
+/* ---------------- 冷库库位不足调度 ---------------- */
+async function vColdChain(){
+  const role = S.me.role;
+  const isCold = role==='coldstore', isMgr = role==='manager', isW = role==='wholesaler';
+  const isBroker = role==='broker', isFarmer = role==='farmer', isQC = role==='qc';
+  const canEnqueue = isCold||isMgr||isFarmer||isBroker;
+  const canAdmit = isCold||isMgr;
+  const canReport = isCold||isMgr||isQC;
+  const [board, queue, incidents, adjusts, sens, batches] = await Promise.all([
+    api('/coldchain/board'), api('/coldchain/queue'), api('/coldchain/incidents'),
+    api('/coldchain/adjustments'), api('/coldchain/sensitivity'), api('/batches')]);
+  const c = board.counts||{};
+  const inQueueIds = new Set(queue.filter(q=>q.status==='waiting'||q.status==='admitted').map(q=>q.batch_id));
+  const unstored = batches.filter(b=>!b.slot_code && ['qc_passed','qc_flagged','sold'].includes(b.status) && !inQueueIds.has(b.id));
+  const waiting = queue.filter(q=>q.status==='waiting');
+
+  $('#view').innerHTML = `
+  <div class="grid c4">
+    <div class="stat"><div class="n" style="color:var(--warn)">${c.waiting_queue||0}</div><div class="t">等待入库（库位不足）</div></div>
+    <div class="stat"><div class="n" style="color:var(--bad)">${c.incidents_pending||0}</div><div class="t">保温失败·待双方确认</div></div>
+    <div class="stat"><div class="n">${c.incidents_confirmed||0}</div><div class="t">已确认·待冷库复盘</div></div>
+    <div class="stat"><div class="n">${c.adjustments_notified||0}</div><div class="t">入场调整·待经纪人确认</div></div>
+  </div>
+
+  <div class="card"><h3>冷库库位（凌晨高峰爆满时按调度顺序放行）</h3>
+    <div class="grid c4">${(board.slots||[]).map(s=>`
+      <div><div style="display:flex;justify-content:space-between;font-size:13px">
+        <b>${s.code}</b><span class="muted">${s.occupied_bundles}/${s.capacity_bundles} 扎 · 余 ${s.free_bundles}</span></div>
+      <div class="bar"><i style="width:${Math.min(100,s.occupied_bundles/s.capacity_bundles*100)}%;background:${s.free_bundles<=15?'var(--bad)':'var(--acc2)'}"></i></div></div>`).join('')}</div>
+    <div class="muted" style="margin-top:8px">调度优先级：花材敏感度高 → 已成交 → 预计提货时间早；敏感度可由市场管理在下方配置。</div></div>
+
+  ${isMgr?`<div class="card"><h3>花材敏感度配置（数值越大越怕开放过快、越优先入库）</h3>
+    <table><tr><th>品类</th><th>敏感度(1-5)</th><th>建议温区</th><th>操作</th></tr>
+    ${sens.map(x=>`<tr><td>${x.category_cn}</td>
+      <td><input id="se_${x.category}" type="number" min="1" max="5" value="${x.sensitivity}" style="width:64px"></td>
+      <td><input id="st_${x.category}" value="${esc(x.temp_window||'')}" placeholder="如 2-4℃ 优先" style="width:150px"></td>
+      <td><button class="small ghost" onclick="saveSens('${x.category}')">保存</button></td></tr>`).join('')}</table></div>`:
+    `<div class="card"><h3>花材敏感度</h3><table><tr><th>品类</th><th>敏感度</th><th>建议温区</th></tr>
+    ${sens.map(x=>`<tr><td>${x.category_cn}</td><td>${badge(x.sensitivity,x.sensitivity>=4?'r':(x.sensitivity>=3?'y':'g'))}</td><td>${esc(x.temp_window||'—')}</td></tr>`).join('')}</table></div>`}
+
+  ${canEnqueue?`<div class="card"><h3>登记临时保温并入等待队列（冷库爆满）</h3>
+    ${unstored.length===0?'<div class="muted">暂无需要排队的批次（需质检通过且未入库）</div>':
+    `<div class="row">
+      <div><label>批次</label><select id="eq_batch">${unstored.map(b=>
+        `<option value="${b.id}">${b.batch_no} ${CAT[b.category]||b.category} ${b.bundles}扎 ${b.grade?b.grade+'级':''}${b.status==='sold'?' · 已成交':''}</option>`).join('')}</select></div>
+      <div><label>预计提货时间</label><input id="eq_eta" type="datetime-local" style="width:180px"></div>
+      <div><label>临时保温方式</label><select id="eq_method">${Object.entries(TEMPM).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></div>
+      <div><label>损耗责任预案</label><select id="eq_resp">${Object.entries(LOSSRESP).map(([k,v])=>`<option value="${k}"${k==='shared'?' selected':''}>${v}</option>`).join('')}</select></div>
+      <div><label>备注</label><input id="eq_note" placeholder="保温位置/注意事项"></div>
+      <div><button onclick="enqueueBatch()">登记排队</button></div>
+    </div><div class="muted">未入库花材须记录临时保温方式与损耗责任；出险后由冷库负责人与批发商双方再确认实际责任。</div>`}</div>`:''}
+
+  <div class="card"><h3>等待入库调度队列（${waiting.length}）</h3>
+    <table><tr><th>序</th><th>批次</th><th>品类</th><th>扎数</th><th>敏感度</th><th>已成交</th><th>预计提货</th><th>临时保温</th><th>损耗责任预案</th><th>花农/经纪人</th><th>状态</th>${canAdmit?'<th>放行入库</th>':''}</tr>
+    ${queue.map((q,idx)=>`<tr>
+      <td>${q.status==='waiting'?idx+1:'—'}</td>
+      <td>${q.batch_no}</td><td>${q.category_cn}</td><td>${q.bundles}</td>
+      <td>${badge('敏感度 '+q.sensitivity, q.sensitivity>=4?'r':(q.sensitivity>=3?'y':'g'))}</td>
+      <td>${q.sold_now?badge('已成交','g'):'未成交'}</td>
+      <td>${q.pickup_eta?fmtT(q.pickup_eta):'—'}</td>
+      <td>${q.temp_method_cn||'—'}</td><td>${q.loss_responsibility_cn||'—'}</td>
+      <td>${esc(q.farmer_name)}${q.broker_name?' / '+esc(q.broker_name):''}</td>
+      <td>${stBadge(QSTATUS,q.status)}${q.slot_code?' · '+q.slot_code:''}</td>
+      ${canAdmit?`<td>${q.status==='waiting'?
+        `<select id="ad_slot_${q.id}">${(board.slots||[]).map(s=>`<option value="${s.id}">${s.code}（余${s.free_bundles}）</option>`).join('')}</select>
+         <button class="small green" onclick="admitQueue(${q.id})">放行</button>
+         <button class="small ghost" onclick="releaseQueue(${q.id})">移出</button>`:'—'}</td>`:''}
+    </tr>`).join('')||'<tr><td colspan=12 class=muted>队列为空</td></tr>'}</table></div>
+
+  ${canReport?`<div class="card"><h3>上报临时保温失败（花材开放过快）</h3>
+    <div class="row">
+      <div><label>批次</label><select id="ic_batch">${batches.filter(b=>!b.slot_code).map(b=>
+        `<option value="${b.id}">${b.batch_no} ${CAT[b.category]||b.category} 开放度${b.openness}</option>`).join('')}</select></div>
+      <div><label>保温前开放度</label><input id="ic_before" type="number" step="0.5" min="1" max="5" value="2" style="width:80px"></div>
+      <div><label>保温后开放度</label><input id="ic_after" type="number" step="0.5" min="1" max="5" value="4.5" style="width:80px"></div>
+      <div><label>临时保温方式</label><select id="ic_method">${Object.entries(TEMPM).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></div>
+      <div><label>情况说明</label><input id="ic_desc" placeholder="如：冰瓶融化、集中开放"></div>
+      <div><button class="warn" onclick="reportIncident()">上报并通知双方</button></div>
+    </div><div class="muted">上报后通知冷库负责人与批发商分别确认责任；双方确认齐后冷库端复盘。</div></div>`:''}
+
+  <div class="card"><h3>临时保温失败事故与责任确认（${incidents.length}）</h3>
+    <table><tr><th>#</th><th>批次/品类</th><th>开放度变化</th><th>保温方式</th><th>冷库责任</th><th>批发商责任</th><th>状态</th><th>复盘结论</th><th>操作</th></tr>
+    ${incidents.map(x=>`<tr>
+      <td>${x.id}</td><td>${x.batch_no} ${x.category_cn}<div class="muted">${esc(x.origin)}</div></td>
+      <td>${x.openness_before??'—'} → <b style="color:var(--bad)">${x.openness_after}</b></td>
+      <td>${x.temp_method_cn||'—'}</td>
+      <td>${x.coldstore_confirmed_at?(x.coldstore_responsible?badge('冷库担责','r'):badge('冷库无责','g')):badge('待确认','y')}</td>
+      <td>${x.wholesaler_confirmed_at?(x.wholesaler_responsible?badge('批发商担责','r'):badge('批发商无责','g')):badge('待确认','y')}</td>
+      <td>${stBadge(INCSTATUS,x.status)}</td>
+      <td style="white-space:normal;max-width:220px">${esc(x.review_note)||'—'}</td>
+      <td style="white-space:normal">
+        ${isCold&&!x.coldstore_confirmed_at&&x.status!=='reviewed'?`<button class="small warn" onclick="confirmIncident(${x.id},'coldstore')">冷库确认责任</button>`:''}
+        ${isW&&!x.wholesaler_confirmed_at&&x.status!=='reviewed'?`<button class="small warn" onclick="confirmIncident(${x.id},'wholesaler')">批发商确认责任</button>`:''}
+        ${isMgr&&x.status==='pending'?`<button class="small ghost" onclick="confirmIncident(${x.id},'coldstore')">代冷库确认</button>
+          <button class="small ghost" onclick="confirmIncident(${x.id},'wholesaler')">代批发商确认</button>`:''}
+        ${canAdmit&&x.status==='confirmed'?`<button class="small green" onclick="reviewIncident(${x.id})">冷库端复盘</button>`:''}
+        ${isMgr&&x.status==='reviewed'&&!x.adjustment_id?`<button class="small" onclick="createAdjustment(${x.id})">发起入场顺序调整</button>`:''}
+        ${x.adjustment_id?badge('已发起入场调整 #'+x.adjustment_id,'p'):''}
+      </td></tr>`).join('')||'<tr><td colspan=9 class=muted>暂无事故</td></tr>'}</table></div>
+
+  <div class="card"><h3>凌晨入场顺序调整（通知经纪人并由其确认）</h3>
+    <table><tr><th>#</th><th>事故</th><th>批次/品类</th><th>调整时段</th><th>生效日</th><th>调整内容</th><th>批发商</th><th>经纪人</th><th>状态</th><th>经纪人反馈</th>${isBroker?'<th>操作</th>':''}</tr>
+    ${adjusts.map(e=>`<tr>
+      <td>${e.id}</td><td>#${e.incident_id}</td><td>${e.batch_no} ${e.category_cn}</td>
+      <td>${esc(e.time_window)}</td><td>${e.effective_date}</td>
+      <td style="white-space:normal;max-width:280px">${esc(e.adjustment)}</td>
+      <td>${esc(e.wholesaler_name)||'—'}</td><td>${esc(e.broker_name)||'全体经纪人'}</td>
+      <td>${stBadge(ADJSTATUS,e.status)}</td><td style="white-space:normal">${esc(e.broker_note)||'—'}</td>
+      ${isBroker?`<td>${e.status==='notified'||e.status==='proposed'?
+        `<button class="small green" onclick="confirmAdjust(${e.id},true)">确认</button>
+         <button class="small ghost" onclick="confirmAdjust(${e.id},false)">异议</button>`:'—'}</td>`:''}
+    </tr>`).join('')||'<tr><td colspan=10 class=muted>暂无入场调整</td></tr>'}</table></div>`;
+
+  const d = new Date(Date.now()+2*3600e3);
+  if($('#eq_eta')) $('#eq_eta').value = new Date(d.getTime()-d.getTimezoneOffset()*6e4).toISOString().slice(0,16);
+}
+const saveSens = run(async cat=>{
+  await api(`/coldchain/sensitivity/${cat}`,'PUT',{sensitivity:+$(`#se_${cat}`).value,temp_window:$(`#st_${cat}`).value});
+  toast('敏感度已保存'); vColdChain();
+});
+const enqueueBatch = run(async ()=>{
+  const j = await api('/coldchain/queue','POST',{
+    batch_id:+$('#eq_batch').value, pickup_eta:$('#eq_eta').value,
+    temp_method:$('#eq_method').value, loss_responsibility:$('#eq_resp').value, loss_note:$('#eq_note').value});
+  toast(`批次 ${j.batch_no} 已登记临时保温并入队（敏感度 ${j.sensitivity}）`); vColdChain();
+});
+const admitQueue = run(async id=>{
+  const j = await api(`/coldchain/queue/${id}/admit`,'POST',{slot_id:+$(`#ad_slot_${id}`).value});
+  toast(`已放行入库：${j.slot_code}`); vColdChain();
+});
+const releaseQueue = run(async id=>{
+  if(!confirm('确定将该批次移出等待队列（货主拉走/改投其他冷库）？')) return;
+  await api(`/coldchain/queue/${id}/release`,'POST',{});
+  toast('已移出队列'); vColdChain();
+});
+const reportIncident = run(async ()=>{
+  const j = await api('/coldchain/incidents','POST',{
+    batch_id:+$('#ic_batch').value, openness_before:+$('#ic_before').value, openness_after:+$('#ic_after').value,
+    temp_method:$('#ic_method').value, description:$('#ic_desc').value});
+  toast(`事故 #${j.id} 已上报，已通知冷库负责人与批发商确认责任`); vColdChain();
+});
+const confirmIncident = run(async (id,side)=>{
+  const responsible = confirm('是否判定本方承担责任（确定=担责，取消=无责）？');
+  const note = prompt('确认备注：', responsible?'认可保温失败责任':'保温措施到位/责任不在己方')||'';
+  const j = await api(`/coldchain/incidents/${id}/confirm`,'POST',{side,responsible,note});
+  toast(j.both_confirmed?'双方责任已确认，请冷库端复盘':'责任确认已提交'); vColdChain();
+});
+const reviewIncident = run(async id=>{
+  const note = prompt('冷库端复盘结论与改进措施：','增配临时冷藏车，高峰时段加密巡视频次')||'';
+  if(!note) return;
+  await api(`/coldchain/incidents/${id}/review`,'POST',{note});
+  toast('冷库复盘完成，市场可据此调整入场顺序'); vColdChain();
+});
+const createAdjustment = run(async id=>{
+  const tw = prompt('调整时段：','03:00-05:00'); if(!tw) return;
+  const adj = prompt('入场顺序调整内容：','已成交高敏感花材优先进场，经纪人代录批次提前30分钟到场'); if(!adj) return;
+  const j = await api(`/coldchain/incidents/${id}/adjustment`,'POST',{time_window:tw,adjustment:adj});
+  toast('入场顺序调整已通知经纪人，等待确认'); vColdChain();
+});
+const confirmAdjust = run(async (id,accept)=>{
+  const note = prompt(accept?'确认备注：':'异议说明：', accept?'已知悉并配合调整':'该时段到场存在困难，建议改期')||'';
+  const j = await api(`/coldchain/adjustments/${id}/confirm`,'POST',{accept,note});
+  toast('已'+(accept?'确认':'反馈异议')+'，状态：'+j.status); vColdChain();
+});
+
+/* ---------------- 通知 ---------------- */
+async function vNotify(){
+  const n = await api('/notifications');
+  $('#view').innerHTML = `
+  <div class="card"><h3>站内通知 <span class="muted">（未读 ${n.unread_count}）</span>
+    <button class="small ghost" style="margin-left:10px" onclick="readAllNotify()">全部已读（不含待确认项）</button></h3>
+    <table><tr><th>#</th><th>类型</th><th>标题</th><th>内容</th><th>状态</th><th>时间</th><th>操作</th></tr>
+    ${n.items.map(x=>`<tr>
+      <td>${x.id}</td><td>${({entry_adjustment:'入场调整',incident:'保温事故',queue:'排队'})[x.type]||x.type}</td>
+      <td style="white-space:normal">${esc(x.title)}</td><td style="white-space:normal;max-width:380px">${esc(x.body)}</td>
+      <td>${x.need_ack?badge('待确认','p'):(x.is_read?'已读':badge('未读','y'))}</td>
+      <td>${fmtT(x.created_at)}</td>
+      <td>${x.is_read?'—':`<button class="small ghost" onclick="readNotify(${x.id})">已读</button>`}
+        ${x.need_ack&&x.ref_type==='adjustment'?`<button class="small green" onclick="go('coldchain')">去确认</button>`:''}</td>
+    </tr>`).join('')||'<tr><td colspan=7 class=muted>暂无通知</td></tr>'}</table></div>`;
+}
+const readNotify = run(async id=>{ await api(`/notifications/${id}/read`,'POST',{}); vNotify(); });
+const readAllNotify = run(async ()=>{ await api('/notifications/read-all','POST',{}); toast('已全部标为已读'); vNotify(); });
+
 const VIEWS = { dash:vDash, batches:vBatches, qc:vQC, storage:vStorage, auctions:vAuctions,
   inventory:vInventory, market:vMarket, orders:vOrders, deliveries:vDeliveries,
-  returns:vReturns, finance:vFinance, admin:vAdmin };
+  returns:vReturns, finance:vFinance, admin:vAdmin, coldchain:vColdChain, notify:vNotify };
 
 /* ---------------- 启动 ---------------- */
 (async function(){

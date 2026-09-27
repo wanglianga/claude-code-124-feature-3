@@ -291,6 +291,96 @@ CREATE TABLE IF NOT EXISTS settlement_lines (
   amount NUMERIC(14,2) NOT NULL
 );
 
+-- 冷库库位不足调度：花材敏感度（数字越大越敏感，越优先入库）
+CREATE TABLE IF NOT EXISTS category_sensitivity (
+  category TEXT PRIMARY KEY,       -- rose/lily/tulip/eustoma/eucalyptus/holiday_mix
+  sensitivity INT NOT NULL,        -- 1-5，越高越怕开放过快、越优先
+  temp_window TEXT NOT NULL DEFAULT '',  -- 建议冷库温区说明
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 冷库爆满时的等待入库队列
+CREATE TABLE IF NOT EXISTS cold_storage_queue (
+  id SERIAL PRIMARY KEY,
+  batch_id INT NOT NULL REFERENCES flower_batches(id),
+  farmer_id INT NOT NULL REFERENCES users(id),
+  broker_id INT REFERENCES users(id),
+  wholesaler_id INT REFERENCES users(id),  -- 已成交批次的拍得批发商
+  sensitivity INT NOT NULL,                 -- 入队时快照的花材敏感度
+  is_sold BOOLEAN NOT NULL DEFAULT false,   -- 是否已成交（成交优先）
+  pickup_eta TIMESTAMPTZ,                    -- 预计提货时间（早提优先）
+  temp_method TEXT NOT NULL,                -- 临时保温方式：ice_pack/quilt/ventilated/shadow/fan/other
+  temp_method_note TEXT NOT NULL DEFAULT '',
+  loss_responsibility TEXT NOT NULL DEFAULT '',  -- 预案损耗责任：farmer/coldstore/wholesaler/shared
+  loss_note TEXT NOT NULL DEFAULT '',
+  priority_score NUMERIC(10,2) NOT NULL DEFAULT 0, -- 调度优先级分（越大越优先）
+  status TEXT NOT NULL DEFAULT 'waiting',
+  -- waiting/admitted/failed/released/expired
+  queued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  admitted_at TIMESTAMPTZ,
+  slot_id INT REFERENCES storage_slots(id),
+  released_by INT REFERENCES users(id),
+  released_at TIMESTAMPTZ,
+  created_by INT NOT NULL REFERENCES users(id)
+);
+
+-- 临时保温失败事故（花材开放过快）
+CREATE TABLE IF NOT EXISTS cold_chain_incidents (
+  id SERIAL PRIMARY KEY,
+  queue_id INT REFERENCES cold_storage_queue(id), -- 已入队批次可空（未入队先保温的极端情形）
+  batch_id INT NOT NULL REFERENCES flower_batches(id),
+  reported_by INT NOT NULL REFERENCES users(id),
+  opened_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  openness_before NUMERIC(3,1),
+  openness_after NUMERIC(3,1),
+  description TEXT NOT NULL DEFAULT '',     -- 开放过快情况描述
+  temp_method TEXT NOT NULL DEFAULT '',
+  coldstore_responsible BOOLEAN NOT NULL DEFAULT false, -- 冷库责任（保温措施不力等）
+  wholesaler_responsible BOOLEAN NOT NULL DEFAULT false,-- 批发商责任（提货延迟/安排不当等）
+  coldstore_confirmed_by INT REFERENCES users(id),
+  coldstore_confirmed_at TIMESTAMPTZ,
+  wholesaler_confirmed_by INT REFERENCES users(id),
+  wholesaler_confirmed_at TIMESTAMPTZ,
+  status TEXT NOT NULL DEFAULT 'pending',   -- pending/confirmed/reviewed
+  reviewed_by INT REFERENCES users(id),     -- 冷库端复盘负责人
+  reviewed_at TIMESTAMPTZ,
+  review_note TEXT NOT NULL DEFAULT '',
+  adjustment_id INT,                         -- 触发的入场顺序调整
+  closed_at TIMESTAMPTZ
+);
+
+-- 市场对凌晨入场顺序的调整（事故复盘后）
+CREATE TABLE IF NOT EXISTS entry_order_adjustments (
+  id SERIAL PRIMARY KEY,
+  incident_id INT NOT NULL REFERENCES cold_chain_incidents(id),
+  time_window TEXT NOT NULL DEFAULT '',     -- 调整时段，如 03:00-05:00
+  wholesaler_id INT REFERENCES users(id),
+  broker_id INT REFERENCES users(id),
+  adjustment TEXT NOT NULL,                 -- 入场顺序调整内容
+  effective_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  status TEXT NOT NULL DEFAULT 'proposed',  -- proposed/notified/confirmed/rejected
+  created_by INT NOT NULL REFERENCES users(id),
+  notified_at TIMESTAMPTZ,
+  broker_confirmed_by INT REFERENCES users(id),
+  broker_confirmed_at TIMESTAMPTZ,
+  broker_note TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 站内通知（入场调整通知经纪人等）
+CREATE TABLE IF NOT EXISTS notifications (
+  id SERIAL PRIMARY KEY,
+  user_id INT NOT NULL REFERENCES users(id),
+  type TEXT NOT NULL,                      -- entry_adjustment/incident/queue
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  ref_type TEXT NOT NULL DEFAULT '',
+  ref_id INT NOT NULL DEFAULT 0,
+  is_read BOOLEAN NOT NULL DEFAULT false,
+  acked BOOLEAN NOT NULL DEFAULT false,    -- 需要确认的通知（经纪人确认入场调整）
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_batches_farmer ON flower_batches(farmer_id);
 CREATE INDEX IF NOT EXISTS idx_batches_status ON flower_batches(status);
 CREATE INDEX IF NOT EXISTS idx_auctions_status_ends ON auctions(status, ends_at);
@@ -301,4 +391,9 @@ CREATE INDEX IF NOT EXISTS idx_orders_batch ON orders(batch_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status_deadline ON orders(status, payment_deadline);
 CREATE INDEX IF NOT EXISTS idx_returns_order ON returns(order_id);
 CREATE INDEX IF NOT EXISTS idx_receivables_customer ON credit_receivables(customer_id, status);
+CREATE INDEX IF NOT EXISTS idx_cold_queue_status ON cold_storage_queue(status, priority_score DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cold_queue_active ON cold_storage_queue(batch_id) WHERE status IN ('waiting','admitted');
+CREATE INDEX IF NOT EXISTS idx_cold_incidents_status ON cold_chain_incidents(status);
+CREATE INDEX IF NOT EXISTS idx_entry_adjust_broker ON entry_order_adjustments(broker_id, status);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read);
 `

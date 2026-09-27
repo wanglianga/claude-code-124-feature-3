@@ -239,6 +239,128 @@ func (a *app) seedDemo() {
 	tx.Exec(`UPDATE flower_batches SET sellable_hours=sellable_hours+12 WHERE id=$1`, b1)
 	_ = pres2
 
+	// ===== 冷库库位不足调度演示 =====
+	// 花材敏感度配置（越大越怕开放、越优先入库）
+	for cat, sens := range map[string]int{
+		"rose": 5, "eustoma": 4, "tulip": 4, "lily": 3, "holiday_mix": 3, "eucalyptus": 1,
+	} {
+		tw := map[int]string{5: "2-4℃ 优先", 4: "2-5℃", 3: "3-6℃", 1: "4-8℃ 耐放"}[sens]
+		tx.Exec(`INSERT INTO category_sensitivity (category, sensitivity, temp_window) VALUES ($1,$2,$3)
+			ON CONFLICT (category) DO NOTHING`, cat, sens, tw)
+	}
+
+	// 用凌晨到货的在库批次把各库位补到接近满载（每库位仅余 10-15 扎），制造爆满
+	fillSlot := func(slotCode string, fillBundles int, cat string) {
+		st := now.Add(-3 * h)
+		fid := addBatch("farmer02", cat, "云南玉溪", now.Add(-7*h), 60, 2.5, fillBundles, 20, 5.0, 48,
+			"B", "", "stored", slotCode, &st)
+		addQC(fid, "B", 0.85, 0.08, true, "凌晨高峰入库", now.Add(-3*h))
+	}
+	fillSlot("A-01", 205, "lily")
+	fillSlot("A-02", 225, "rose")
+	fillSlot("A-03", 200, "holiday_mix")
+	fillSlot("A-04", 285, "eustoma")
+	fillSlot("B-01", 100, "eucalyptus")
+	fillSlot("B-02", 140, "lily")
+	// 按实际在库批次重算库位占用（补满至每库位仅余 10-15 扎，制造凌晨爆满）
+	tx.Exec(`UPDATE storage_slots s SET occupied_bundles = COALESCE(
+		(SELECT sum(bundles) FROM flower_batches WHERE storage_slot_id=s.id AND out_at IS NULL), 0)`)
+
+	// 已成交但待入库的批次需要库存行
+	soldInventory := func(batchID int, wholesaler string, bundles int, price float64) {
+		tx.Exec(`INSERT INTO inventories (wholesaler_id, batch_id, bundles_total, bundles_available, cost_price, listed, status, created_at)
+			VALUES ($1,$2,$3,$3,$4,false,'in_stock',$5)`, uid[wholesaler], batchID, bundles, price, now.Add(-1*h))
+	}
+
+	// 等待入库批次（均 30 扎以上，爆满期间任何库位都放不下）
+	eta7 := now.Add(50 * m)  // 玫瑰：高敏感 + 早提货
+	eta8 := now.Add(3 * h)   // 尤加利：低敏感 + 晚提货
+	eta9 := now.Add(40 * m)  // 百合：已成交
+	eta10 := now.Add(20 * m) // 郁金香：已成交，临时保温失败（见下）
+	b7 := addBatch("farmer01", "rose", "云南昆明", now.Add(-2*h), 68, 2.0, 40, 20, 6.5, 48,
+		"A", "", "qc_passed", "", nil)
+	tx.Exec(`UPDATE flower_batches SET broker_id=$1 WHERE id=$2`, uid["broker01"], b7)
+	b8 := addBatch("farmer02", "eucalyptus", "云南昆明", now.Add(-2*h), 55, 1.5, 35, 10, 6.0, 96,
+		"B", "", "qc_passed", "", nil)
+	b9 := addBatch("farmer02", "lily", "辽宁凌源", now.Add(-3*h), 62, 2.5, 45, 10, 6.0, 60,
+		"B", "", "sold", "", nil)
+	tx.Exec(`UPDATE flower_batches SET broker_id=$1 WHERE id=$2`, uid["broker01"], b9)
+	soldInventory(b9, "wholesaler01", 45, 24)
+	b10 := addBatch("farmer01", "tulip", "云南昆明", now.Add(-4*h), 45, 2.0, 30, 10, 7.0, 36,
+		"B", "", "sold", "", nil)
+	tx.Exec(`UPDATE flower_batches SET broker_id=$1 WHERE id=$2`, uid["broker01"], b10)
+	soldInventory(b10, "wholesaler02", 30, 18)
+	addQC(b7, "A", 0.9, 0.05, true, "", now.Add(-90*m))
+	addQC(b8, "B", 0.86, 0.08, true, "", now.Add(-80*m))
+	addQC(b9, "B", 0.83, 0.09, true, "", now.Add(-2*h))
+	addQC(b10, "B", 0.82, 0.1, true, "", now.Add(-3*h))
+
+	addQueue := func(batchID int, farmer, broker, wholesaler string, sens int, isSold bool,
+		eta time.Time, method, resp, qstatus string) int {
+		var qid int
+		var brokerArg, wholeArg any
+		if broker != "" {
+			brokerArg = uid[broker]
+		}
+		if wholesaler != "" {
+			wholeArg = uid[wholesaler]
+		}
+		tx.QueryRow(`INSERT INTO cold_storage_queue
+			(batch_id, farmer_id, broker_id, wholesaler_id, sensitivity, is_sold, pickup_eta, temp_method,
+			 temp_method_note, loss_responsibility, loss_note, priority_score, status, queued_at, created_by)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id`,
+			batchID, uid[farmer], brokerArg, wholeArg,
+			sens, isSold, eta, method, "凌晨爆满，库外临时保温", resp,
+			"出险后按预案并由冷库/批发商双方确认",
+			coldPriorityScore(sens, isSold, &eta), qstatus, now.Add(-30*m), uid["cold01"]).Scan(&qid)
+		return qid
+	}
+	_ = addQueue(b7, "farmer01", "broker01", "", 5, false, eta7, "ice_pack", "farmer", "waiting")
+	_ = addQueue(b8, "farmer02", "", "", 1, false, eta8, "ventilated", "shared", "waiting")
+	_ = addQueue(b9, "farmer02", "broker01", "wholesaler01", 3, true, eta9, "quilt", "wholesaler", "waiting")
+	q10 := addQueue(b10, "farmer01", "broker01", "wholesaler02", 4, true, eta10, "ice_pack", "shared", "failed")
+
+	// 事故1：郁金香临时保温失败开放过快 —— 冷库与批发商均已确认责任，冷库已复盘，
+	// 市场已发起该时段入场顺序调整并通知经纪人，经纪人待确认
+	var inc1 int
+	tx.QueryRow(`INSERT INTO cold_chain_incidents
+		(queue_id, batch_id, reported_by, opened_at, openness_before, openness_after, description, temp_method,
+		 coldstore_responsible, wholesaler_responsible, coldstore_confirmed_by, coldstore_confirmed_at,
+		 wholesaler_confirmed_by, wholesaler_confirmed_at, status, reviewed_by, reviewed_at, review_note, closed_at)
+		VALUES ($1,$2,$3,$4,2.0,4.5,$5,'ice_pack',true,true,$6,$7,$8,$9,'reviewed',$6,$10,$11,$10) RETURNING id`,
+		q10, b10, uid["cold01"], now.Add(-2*h),
+		"加冰瓶保温失败，郁金香集中开放，无法赶上早场提货",
+		uid["cold01"], now.Add(-100*m), uid["wholesaler02"], now.Add(-95*m),
+		now.Add(-70*m), "冷库临时保温位不足 + 批发商提货延迟，双方共责；已增配临时冷藏车").Scan(&inc1)
+	var adj1 int
+	tx.QueryRow(`INSERT INTO entry_order_adjustments
+		(incident_id, time_window, wholesaler_id, broker_id, adjustment, effective_date, status, created_by, notified_at)
+		VALUES ($1,'03:00-05:00',$2,$3,$4,$5,'notified',$6,$7) RETURNING id`,
+		inc1, uid["wholesaler02"], uid["broker01"],
+		"03:00-05:00 高峰时段：已成交且敏感度高的花材优先进场，经纪人代录批次提前 30 分钟到场，临时保温车就位",
+		now, uid["boss01"], now.Add(-60*m)).Scan(&adj1)
+	tx.Exec(`UPDATE cold_chain_incidents SET adjustment_id=$1 WHERE id=$2`, adj1, inc1)
+	tx.Exec(`INSERT INTO notifications (user_id, type, title, body, ref_type, ref_id, acked, is_read, created_at)
+		VALUES ($1,'entry_adjustment',$2,$3,'adjustment',$4,true,false,$5)`,
+		uid["broker01"], "凌晨入场顺序调整通知（03:00-05:00 时段）",
+		"依据郁金香保温失败复盘：已成交高敏感花材优先进场，代录批次提前 30 分钟到场，请确认知悉。",
+		adj1, now.Add(-60*m))
+
+	// 事故2：百合临时保温疑似失败开放过快 —— 刚上报，冷库负责人与批发商均待确认责任
+	// （独立暂存区发生的事故，未关联等待队列：该批次仍在另一保温位正常排队）
+	var inc2 int
+	tx.QueryRow(`INSERT INTO cold_chain_incidents
+		(queue_id, batch_id, reported_by, opened_at, openness_before, openness_after, description, temp_method, status)
+		VALUES (NULL,$1,$2,$3,2.5,4.0,$4,'quilt','pending') RETURNING id`,
+		b9, uid["cold01"], now.Add(-15*m),
+		"保温棉被覆盖后温度回升，百合开放加快，等待双方确认责任").Scan(&inc2)
+	tx.Exec(`INSERT INTO notifications (user_id, type, title, body, ref_type, ref_id, acked, is_read, created_at)
+		VALUES ($1,'incident',$2,$3,'incident',$4,false,false,$5)`,
+		uid["cold01"], "保温失败待确认责任：百合批次开放过快", "开放度 2.5 → 4.0，请冷库负责人确认责任。", inc2, now.Add(-15*m))
+	tx.Exec(`INSERT INTO notifications (user_id, type, title, body, ref_type, ref_id, acked, is_read, created_at)
+		VALUES ($1,'incident',$2,$3,'incident',$4,false,false,$5)`,
+		uid["wholesaler01"], "保温失败待确认责任：百合批次开放过快", "开放度 2.5 → 4.0，请批发商确认责任。", inc2, now.Add(-15*m))
+
 	if err := tx.Commit(); err != nil {
 		log.Printf("演示数据提交失败: %v", err)
 		return
